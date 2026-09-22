@@ -1,0 +1,43 @@
+# Metadatos del proyecto. `refuto` se clona y se ejecuta: `python3 refuto.py` o `bin/refuto`.
+#
+# NO declara `[project.scripts]` a propósito. Medido el 2026-09-22 en un entorno virtual
+# limpio: `pip install --no-deps .` instala sin error, y el `refuto` resultante NO encuentra
+# `schemas/` ni `roles/` —`core/schema.py` y `core/roles.py` los resuelven junto al paquete—,
+# así que G-MANIFEST y G-HUMAN quedan en NOT_EXECUTABLE y G-ROLES en FAIL. Un binario que
+# arranca y falla al validar es peor que uno que no existe: prometerlo aquí sería declarar
+# soportado algo que está en NOT_RUN. Ver docs/estado-del-proyecto.md.
+#
+# Sin dependencias, y así debe seguir: si aparece una, deja de ser cierto que este programa
+# corre en cualquier máquina con Python y nada más.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "refuto"
+dynamic = ["version"]
+description = "Gobierno de agentes de código: una sola política, aplicada en el gancho de cada agente, con evidencia encadenada."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Oscar Valois" }]
+keywords = ["ai-agents", "governance", "policy", "evidence", "claude-code", "antigravity", "kiro", "codex"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[tool.setuptools]
+py-modules = ["refuto"]
+packages = ["core", "gates", "adapters"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.md"]

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Estado LOCAL del espacio: nunca se versiona. Así entraron notas de un cliente en
+# este repositorio antes de su primera publicación; refuto genera este mismo
+# .gitignore en cada espacio que instala (core/session.py::ensure_gitignore).
+.harness/evidence/
+.harness/state/
+.harness/context/
+.harness/memory/
+.harness/backup/
+.harness/bin/
+.harness/binding.json

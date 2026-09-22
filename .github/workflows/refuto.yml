@@ -1,0 +1,137 @@
+# Tubería de refuto. Falla ante cualquier condición crítica.
+#
+# Regla de este archivo: **ningún paso se permite fallar en silencio**. Donde un código de salida
+# distinto de cero es el resultado esperado —la sonda sale con 1 en un runner sin agentes— se
+# captura explícitamente y se juzga con un guion, en vez de taparlo con `|| true`.
+#
+# Los códigos de salida de refuto se respetan tal cual:
+#   0  integrable   1  puertas en rojo o no ejecutables   2  puertas bloqueadas   64  error de uso
+# El código 2 NO se trata como éxito. «No se pudo comprobar» no es «está bien».
+#
+# ESTADO: NOT_RUN. Este flujo nunca ha corrido en verde en el runner. Mientras siga así, ninguna
+# afirmación de la documentación puede apoyarse en «lo comprueba la CI».
+#
+# El nombre del archivo (`refuto.yml`) lo exige `scripts/check_wiring.py`; renombrarlo a
+# `refuto.yml` obliga a cambiar también esa ruta allí.
+name: refuto
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refuto-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contrato:
+    name: Contrato, unidad, auto-prueba y adversariales
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Se prueba el mínimo declarado y el actual. Si refuto deja de correr en 3.10, deja de
+        # poder diagnosticar la mitad de las máquinas donde hace falta. Nota honesta: 3.10 no se
+        # ha ejecutado nunca, ni aquí ni en local (NOT_RUN); este trabajo es lo que lo cerraría.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+
+      - name: Sin dependencias de terceros
+        # refuto declara correr sólo con biblioteca estándar. Aquí se comprueba, en vez de
+        # confiar: un `import` de tercero se cuela en cualquier revisión distraída.
+        run: python3 scripts/check_stdlib_only.py
+
+      - name: Compilación de todo el árbol
+        run: python3 -m compileall -q core adapters gates tests refuto.py
+
+      - name: Esquemas dentro del subconjunto soportado
+        run: python3 scripts/check_schemas.py
+
+      - name: Todo componente conectado, no sólo escrito
+        # Un módulo que existe y que nadie invoca es peor que no tenerlo: aparece en el
+        # inventario, se cita en las revisiones, y no hace nada.
+        run: python3 scripts/check_wiring.py
+
+      - name: Suite completa
+        # `--verbose` es opción del parser RAÍZ: va ANTES del subcomando. Escrito al revés,
+        # argparse sale con 2 y este trabajo falla siempre sin llegar a ejecutar una prueba.
+        run: python3 refuto.py --verbose selftest
+
+  espacio:
+    name: Puertas sobre el espacio de ejemplo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+
+      - name: Inicializar el espacio de ejemplo
+        run: |
+          set -euo pipefail
+          python3 refuto.py --workspace examples/espacio-minimo init
+
+      - name: Verificar
+        # Sin red: en CI no se interrogan servidores HTTP ni se consultan orígenes remotos.
+        # Los servidores stdio SÍ se comprueban, porque son procesos locales.
+        #
+        # `verify` sale con 1 (rojo) o 2 (bloqueado) cuando lo hay, y eso debe parar la
+        # integración. El código se captura para poder imprimirlo antes de propagarlo: un
+        # `set -e` a secas deja al lector sin saber cuál de los dos fue.
+        run: |
+          set -uo pipefail
+          python3 refuto.py --workspace examples/espacio-minimo verify --offline --json \
+            > refuto-run.json
+          rc=$?
+          echo "verify rc=$rc  (0 integrable · 1 rojo · 2 bloqueado)"
+          test -s refuto-run.json || { echo "verify no produjo salida"; exit 1; }
+          python3 scripts/gate_summary.py refuto-run.json
+          exit $rc
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidencia
+          path: |
+            refuto-run.json
+            examples/espacio-minimo/.harness/evidence/
+          retention-days: 90
+
+  agentes:
+    name: Sonda de agentes (informativa)
+    runs-on: ubuntu-latest
+    # Los agentes no están instalados en el ejecutor. Este trabajo comprueba que la sonda
+    # REPORTA su ausencia correctamente, no que los agentes existan. Marcar «soportado» un
+    # agente que no está es exactamente lo que refuto existe para impedir.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: La sonda declara NOT_INSTALLED, no revienta ni inventa
+        run: |
+          set -uo pipefail
+          # `probe` sale con 1 cuando algún agente no llega a FUNCTIONAL, que en un ejecutor sin
+          # agentes es SIEMPRE. Ese código no es el criterio de este trabajo, así que se captura
+          # y se declara —no se tapa—. El criterio lo aplica check_probe_honesty.py sobre la
+          # salida: si la sonda revienta o inventa, ese guion falla y el trabajo con él.
+          python3 refuto.py probe --json > probe.json
+          rc=$?
+          echo "probe rc=$rc  (1 es lo esperado en un runner sin agentes instalados)"
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "la sonda salió con $rc, que no es ni 0 ni 1: eso sí es un fallo"; exit "$rc"
+          fi
+          test -s probe.json || { echo "la sonda no produjo salida"; exit 1; }
+          set -e
+          python3 scripts/check_probe_honesty.py probe.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: sonda, path: probe.json, retention-days: 30 }
