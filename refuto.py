@@ -932,6 +932,39 @@ def cmd_policy(opts) -> int:
         print(json.dumps(policy.to_dict(), ensure_ascii=False, indent=2))
         return EXIT_OK
 
+    if opts.action == "refine":
+        # Resuelve `extends` y MUESTRA la política efectiva con su identidad. No cambia cómo
+        # se carga la política en el resto del programa: hacerlo en silencio convertiría un
+        # cambio de contrato en un efecto secundario. Ver
+        # docs/architecture/HERENCIA-REFUTO-CLIENTE-PROYECTO.md.
+        from core.refinement import resolver
+
+        def buscar(ref: str):
+            """El padre por ruta, relativa al espacio o absoluta. Deliberadamente simple:
+            resolver por NOMBRE contra el censo exige decidir dónde vive la capa de cliente,
+            y esa decisión no está tomada. Un resolvedor que adivinara sería peor."""
+            cand = Path(ref)
+            cand = cand if cand.is_absolute() else ws / cand
+            if not cand.is_file():
+                return None
+            return json.loads(cand.read_text(encoding="utf-8"))
+
+        r = resolver(ws, ctx.policy_doc or {}, buscar=buscar)
+        if opts.json:
+            print(json.dumps(r.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            simbolo = R.paint("✓", "32") if r.status == "PASS" else R.paint("✗", "31")
+            print(f"\n  {simbolo} {R.bold(r.status)} · {r.motivo}")
+            if r.identidad:
+                print(f"    identidad   {r.identidad.nombre}@{r.identidad.version}")
+                print(f"    digest      {r.identidad.digest[:16]}…")
+                print(f"    efectivo    {r.identidad.efectivo[:16]}…  "
+                      f"{R.dim('(encadena al padre: si el padre cambia, esto cambia)')}")
+            for v in r.violaciones:
+                print(R.paint(f"    ✗ {v}", "31"))
+            print()
+        return EXIT_OK if r.status == "PASS" else EXIT_FAIL
+
     if opts.action == "prune":
         from core import hygiene
         objetivos = [ws / ".claude" / "settings.local.json", ws / ".claude" / "settings.json"]
@@ -1607,8 +1640,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     po = sub.add_parser("policy", help="compila la política canónica a cada runtime; `prune` retira reglas de permiso podridas")
     po.add_argument("action",
-                    choices=["show", "plan", "compile", "wire", "unwire", "audit", "prune"])
+                    choices=["show", "refine", "plan", "compile", "wire", "unwire",
+                             "audit", "prune"])
     po.add_argument("--agent", action="append", default=[])
+    po.add_argument("--json", action="store_true",
+                    help="con `refine`: la política efectiva y su identidad en JSON")
     po.add_argument("--dry-run", action="store_true")
     po.add_argument("--repos", action="store_true",
                     help="con `wire`: engancha tambien cada repositorio del espacio, todos al "

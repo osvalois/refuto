@@ -118,7 +118,11 @@ dominio; refuto **traduce** ese veredicto a su vocabulario y lo integra en la co
 - Qué **no** resuelve: sigue sin haber capa de cliente. Dos proyectos del mismo cliente
   siguen repitiendo su política entera.
 
-### Etapa 2 · Herencia de declaración — `extends`
+### Etapa 2 · Herencia de declaración — `NOT_RUN`
+
+`extends` funciona hoy para **políticas** (etapa 3). Para el **manifiesto** —heredar la lista
+de puertas, los roles y el método— no está implementado: `NOT_RUN`.
+
 
 ```json
 { "schema": "harness.manifest/v1",
@@ -138,21 +142,36 @@ Ese último punto ya tiene precedente medido en este repositorio: `Policy.from_d
 `PoliticaIlegible` cuando no reconoce **ninguna** clave, precisamente porque un documento de
 otro programa producía la política de fábrica y el espacio parecía gobernado sin estarlo.
 
-### Etapa 3 · Herencia de política — superposición
+### Etapa 3 · Refinamiento de política — **IMPLEMENTADO**
 
-La más delicada, y por eso va la última. Reglas propuestas:
+`core/refinement.py`, expuesto como `refuto policy refine`. La invariante:
 
 ```
-protected_paths       se ACUMULAN     el hijo protege más, nunca menos
-command_deny          se ACUMULAN     idem
-writable_paths        NO se heredan   una excepción se declara donde se usa y se ve
-external_write_allow  NO se heredan   idem
-block_secret_content  se ENDURECE     true del padre no se puede poner a false
+restricciones(hijo)  ⊇  restricciones(padre)
 ```
 
-`writable_paths` no se hereda **a propósito**: es el mecanismo por el que se abre un agujero
-en lo protegido, y un agujero heredado en silencio a través de dos capas es indetectable en
-revisión.
+Cada campo de `Policy` declara su monotonía, y **ninguno puede quedarse sin declararla**: el
+módulo no se importa si falta alguna. Un campo sin regla se heredaría como suponga quien lo
+escribió, que es como no decidirlo.
+
+| campo | regla | por qué |
+|---|---|---|
+| `protected_paths` `secret_read_deny` `command_deny` `command_ask` `network_rules` | **ACUMULA** | el hijo hereda todo y puede añadir; retirar es violación |
+| `writable_paths` `external_write_allow` | **REDUCE** | abren agujeros en lo protegido: el hijo puede cerrarlos, nunca abrir otros |
+| `block_secret_content` | **ENDURECE** | `true` del padre no se puede poner a `false` |
+| `schema` `version` `default_modes` | **PROPIO** | metadatos y modo de interacción: no son restricciones |
+
+Una corrección respecto a la primera versión de este documento: se dijo que `writable_paths`
+**no se heredaría**. Es peor. Sin heredarlos, el hijo los declara desde cero y puede escribir
+cualquiera — es decir, puede abrir un agujero que el padre no tenía. `REDUCE` conserva la
+intención (nadie abre nada nuevo) y además propaga los cierres del padre.
+
+**Lo que NO es:** no es `{**padre, **hijo}`. Un `merge` deja que el hijo sustituya cualquier
+clave, y sustituir es relajar cuando la clave es una restricción. Medido: con un `merge`
+ingenuo, **los 10 ataques de `tests/adversarial/test_monotonia.py` sobreviven**.
+
+Y cuando el hijo intenta relajar, **no se aplica ninguna parte**. Una política a medias es
+indistinguible de una política, y esa indistinguibilidad es el fallo.
 
 ## 5 · Qué probar antes de creerse cada etapa
 
@@ -181,3 +200,67 @@ funciona; éstas comprueban que **no se puede usar para lo que no es**.
 - Que esté implementada. **Nada de las etapas 2 y 3 existe**: `extends` no está en ningún
   esquema ni en ningún módulo. Este documento es una propuesta, y mientras no haya pruebas
   ejecutadas su estado es `NOT_RUN`.
+
+## 7 · `POLICY` ≠ `ENFORCEMENT` ≠ `ASSURANCE`
+
+Tres cosas distintas que se confunden con facilidad, y confundirlas atribuye a refuto una
+capacidad que no tiene.
+
+| | qué es | quién lo hace aquí |
+|---|---|---|
+| **POLICY** | qué está permitido | `.harness/policy.json`, y su refinamiento |
+| **ENFORCEMENT** | qué **impide físicamente** una acción prohibida | el guardián como `PreToolUse` del runtime, la protección de rama del servidor, el sandbox del sistema operativo |
+| **ASSURANCE** | qué **demuestra** que el contrato se cumplió | las 13 puertas, la evidencia, la falsación |
+
+El ejemplo que lo separa:
+
+```
+policy       un agente no modifica producción
+enforcement  el sandbox o la autorización deniegan la operación
+assurance    refuto comprueba la política, comprueba el enganche, y observa la denegación
+```
+
+**Refuto hace enforcement en un solo sitio y de forma limitada**: el guardián intercepta
+`PreToolUse` del runtime que lo tenga enganchado. Eso no es un sandbox. Un agente que se
+salte el runtime —o que corra sin el gancho— escribe igual. Lo que refuto sí puede demostrar
+es que el gancho estaba puesto y que la denegación ocurrió, porque queda en el diario.
+
+Medido en esta sesión: la protección de rama que sí sería enforcement de verdad **no está
+disponible** (`HTTP 403`, requiere plan de pago), y lo que hay en su lugar es un gancho local
+que se salta con `--no-verify`. Está declarado como tal en `docs/operations/DEVSECOPS.md`. Un
+control que se presenta como barrera cuando es un recordatorio hace creer que hay defensa
+donde hay costumbre.
+
+## 8 · Preparación para agentes — conceptual, `NOT_RUN`
+
+La cadena que refuto debe poder gobernar:
+
+```
+principal → delega → agente → pide capacidad → herramienta/acción → recurso → efecto → evidencia
+```
+
+Qué hay hoy de cada pieza, medido:
+
+| pieza | estado |
+|---|---|
+| `Identity` | **parcial** — identidad tipada de ejecución (`ses_` `orq_` `ver_` `ctx_`), ADR-0012 |
+| `Capability` | **parcial** — `core/capability.py` con 7 estados y catálogo |
+| `Tool` / `Action` | **parcial** — el guardián decide por herramienta y patrón de argumentos |
+| `Evidence` | **sí** — `Evidence` ya lleva `kind, summary, command, source, exit_code, stdout_digest, excerpt, redacted` |
+| `Authority` / `Delegation` | **`NOT_RUN`** — no existe `parent_run_id` ni frontera de autoridad |
+| `Agent` como principal gobernable | **`NOT_RUN`** |
+
+**Lo que NO se construyó a propósito**, y es un criterio de parada, no una omisión:
+orquestación de LLM, planificador, memoria de agente, runtime multi-agente. Eso pertenece a
+las capas que *consumen* refuto. Refuto debe gobernarlas, no convertirse en ellas — y un
+sustrato que empieza a planificar deja de poder juzgar con independencia lo que planifica.
+
+## 9 · Límites actuales, declarados
+
+| | estado | por qué |
+|---|---|---|
+| herencia de **manifiesto** (`extends` de puertas/roles/método) | `NOT_RUN` | sólo la política refina |
+| resolución del padre **por nombre** contra el censo | `NOT_RUN` | exige decidir dónde vive la capa de cliente; hoy `extends` es una ruta |
+| adaptador stdout del verificador externo | `BLOCKED` | vive en `gates/**`, protegido por política |
+| `G-SDD`: integración declarada con ejecutor ausente | **inconsistencia** | devuelve `BLOCKED`; el contrato de estados dice `NOT_EXECUTABLE` («falta el ejecutor»). En `gates/**` |
+| segunda máquina | `BLOCKED` | sólo existe una · `LIMITATION: single-host` |
