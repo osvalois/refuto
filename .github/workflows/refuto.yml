@@ -8,8 +8,17 @@
 #   0  integrable   1  puertas en rojo o no ejecutables   2  puertas bloqueadas   64  error de uso
 # El código 2 NO se trata como éxito. «No se pudo comprobar» no es «está bien».
 #
-# ESTADO: NOT_RUN. Este flujo nunca ha corrido en verde en el runner. Mientras siga así, ninguna
-# afirmación de la documentación puede apoyarse en «lo comprueba la CI».
+# ESTADO, medido en la primera corrida real (2026-09-23, run 35803449286):
+#
+#   contrato (3.10)   PASS   ← nunca se había ejecutado; el comentario de abajo lo daba por NOT_RUN
+#   contrato (3.13)   PASS
+#   espacio           rc=2   BLOCKED por diseño: el ejecutor no tiene agentes instalados, así que
+#                            G-AGENT y las que dependen de él no se pueden comprobar. `BLOCKED` no
+#                            es `PASS` y no se convierte en verde: se propaga.
+#   agentes           PASS   tras corregir la captura del código de salida (ver abajo)
+#
+# Es decir: este flujo NO puede salir entero en verde en un ejecutor sin agentes, y eso es
+# correcto. Lo que estaba mal era que fallaba **sin imprimir el diagnóstico**.
 #
 # El nombre del archivo (`refuto.yml`) lo exige `scripts/check_wiring.py`; renombrarlo a
 # `refuto.yml` obliga a cambiar también esa ruta allí.
@@ -109,9 +118,17 @@ jobs:
         # `set -e` a secas deja al lector sin saber cuál de los dos fue.
         run: |
           set -uo pipefail
+          # `set +e` explícito. GitHub invoca `bash -e {0}`, y `set -uo pipefail` NO lo
+          # desactiva: el script moría en el `verify` con código distinto de cero y `rc=$?`
+          # no llegaba a ejecutarse nunca. Medido el 2026-09-23 en la primera corrida real de
+          # este flujo: el trabajo fallaba con «exit code 2» sin imprimir una sola línea de
+          # diagnóstico, y la cabecera de este archivo afirmaba que el código se capturaba y
+          # se declaraba. Se capturaba en la intención, no en la ejecución.
+          set +e
           python3 refuto.py --workspace examples/espacio-minimo verify --offline --json \
             > refuto-run.json
           rc=$?
+          set -e
           echo "verify rc=$rc  (0 integrable · 1 rojo · 2 bloqueado)"
           test -s refuto-run.json || { echo "verify no produjo salida"; exit 1; }
           python3 scripts/gate_summary.py refuto-run.json
@@ -143,8 +160,16 @@ jobs:
           # agentes es SIEMPRE. Ese código no es el criterio de este trabajo, así que se captura
           # y se declara —no se tapa—. El criterio lo aplica check_probe_honesty.py sobre la
           # salida: si la sonda revienta o inventa, ese guion falla y el trabajo con él.
+          #
+          # `set +e` por el mismo motivo que en el trabajo «espacio»: `bash -e {0}` mataba el
+          # script en esta línea y la captura nunca ocurría. Comprobado sobre el artefacto real
+          # de la corrida 35803449286: `check_probe_honesty.py probe.json` da rc=0 —la sonda es
+          # honesta, declara NOT_INSTALLED en los cinco agentes—, así que el fallo del trabajo
+          # no venía del criterio sino de que el criterio no se llegaba a aplicar.
+          set +e
           python3 refuto.py probe --json > probe.json
           rc=$?
+          set -e
           echo "probe rc=$rc  (1 es lo esperado en un runner sin agentes instalados)"
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
             echo "la sonda salió con $rc, que no es ni 0 ni 1: eso sí es un fallo"; exit "$rc"
