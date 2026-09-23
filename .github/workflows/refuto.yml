@@ -139,28 +139,33 @@ jobs:
         run: |
           set -euo pipefail
           tmp=$(mktemp -d); cd "$tmp"
-          baja() {  # baja() <url-binario> <url-checksums> <nombre-en-checksums>
-            curl -fsSL -o paquete.tgz "$1"
+          # El tarball se baja CON SU NOMBRE REAL, no renombrado: el fichero de sumas
+          # referencia ese nombre y `sha256sum -c` lo busca en disco. Renombrarlo hacía que
+          # la comprobación fallara con «No such file or directory» y el paso abortara
+          # diciendo «cadena de suministro comprometida» — un falso positivo del propio
+          # control de cadena de suministro. Medido en la corrida 35806… del 2026-09-23.
+          baja() {  # baja() <url-binario> <url-checksums> <nombre-del-fichero>
+            mkdir -p "$3.d" && cd "$3.d"
+            curl -fsSL -o "$3" "$1"
             curl -fsSL -o SUMAS "$2"
-            grep " $3\$\| $3\$" SUMAS | sha256sum -c - || {
+            grep "  *$3\$" SUMAS | sha256sum -c - || {
               echo "::error::checksum de $3 no coincide — cadena de suministro comprometida"
               exit 1; }
-            tar xzf paquete.tgz
+            tar xzf "$3"
+            cd ..
           }
           baja "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS}/gitleaks_${GITLEAKS}_linux_x64.tar.gz" \
                "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS}/gitleaks_${GITLEAKS}_checksums.txt" \
                "gitleaks_${GITLEAKS}_linux_x64.tar.gz"
-          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
-          rm -f paquete.tgz SUMAS
+          sudo install -m 0755 "gitleaks_${GITLEAKS}_linux_x64.tar.gz.d/gitleaks" /usr/local/bin/gitleaks
           baja "https://github.com/anchore/syft/releases/download/v${SYFT}/syft_${SYFT}_linux_amd64.tar.gz" \
                "https://github.com/anchore/syft/releases/download/v${SYFT}/syft_${SYFT}_checksums.txt" \
                "syft_${SYFT}_linux_amd64.tar.gz"
-          sudo install -m 0755 syft /usr/local/bin/syft
-          rm -f paquete.tgz SUMAS
+          sudo install -m 0755 "syft_${SYFT}_linux_amd64.tar.gz.d/syft" /usr/local/bin/syft
           baja "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY}/trivy_${TRIVY}_Linux-64bit.tar.gz" \
                "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY}/trivy_${TRIVY}_checksums.txt" \
                "trivy_${TRIVY}_Linux-64bit.tar.gz"
-          sudo install -m 0755 trivy /usr/local/bin/trivy
+          sudo install -m 0755 "trivy_${TRIVY}_Linux-64bit.tar.gz.d/trivy" /usr/local/bin/trivy
           cd - >/dev/null
           echo "instalados, con checksum verificado:"
           gitleaks version; syft version | head -2; trivy --version | head -1
