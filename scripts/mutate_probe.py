@@ -253,12 +253,34 @@ def reparar_si_hace_falta() -> str:
             f"y se restauró. Cualquier medición hecha entre medias es INVÁLIDA.")
 
 
-def _correr(suites: list) -> tuple[bool, str]:
-    """Devuelve (todas_pasaron, salida_completa)."""
+def _correr(suites: list, etiqueta: str = "") -> tuple[bool, str]:
+    """Devuelve (todas_pasaron, salida_completa).
+
+    Caché de bytecode aislada por ejecución, y no es una precaución de manual
+    ------------------------------------------------------------------------
+    Python invalida un `.pyc` comparando **(mtime, tamaño)** del fuente. Las mutaciones M2 y M3
+    insertan la MISMA cadena (`"False and "`) en el MISMO fichero, así que los dos ficheros
+    mutados pesan exactamente lo mismo — medido: 16 509 bytes los dos. En un ejecutor rápido
+    ambas escrituras caen dentro del mismo segundo, y entonces el intérprete sirve el `.pyc`
+    de la mutación ANTERIOR como si fuera el de la actual.
+
+    Ocurrió de verdad. CI (ubuntu-latest, Python 3.13, corrida 35805060715) informó
+    `M3 … MUERTA_INCIDENTAL`, muerta por `test_no_aplica_exige_motivo_declarado` —que es el
+    testigo de **M2**, no de M3— mientras el testigo de M3 pasaba tranquilamente. La sonda
+    estaba midiendo una mutación y ejecutando otra. En local nunca se reprodujo porque entre
+    mutación y mutación pasan segundos.
+
+    Una sonda que puede atribuir el resultado de una mutación a otra no mide cobertura
+    semántica: fabrica un número. `PYTHONPYCACHEPREFIX` apunta cada ejecución a un directorio
+    nuevo, así que siempre se compila el fuente que hay en disco.
+    """
     argv = [sys.executable, str(ROOT / "refuto.py"), "selftest"]
     for s in suites:
         argv += ["--suite", s]
-    p = subprocess.run(argv, capture_output=True, cwd=str(ROOT), timeout=900, **TEXT_IO)
+    with tempfile.TemporaryDirectory(prefix=f"refuto-pyc-{etiqueta or 'x'}-") as pyc:
+        env = dict(os.environ, PYTHONPYCACHEPREFIX=pyc)
+        p = subprocess.run(argv, capture_output=True, cwd=str(ROOT), timeout=900,
+                           env=env, **TEXT_IO)
     return p.returncode == 0, (p.stdout or "") + (p.stderr or "")
 
 
@@ -276,12 +298,12 @@ def _clasificar_muerte(salida: str, testigos: tuple) -> tuple[str, list]:
     culpables = [ln.strip() for ln in salida.splitlines()
                  if ln.startswith(("FAIL:", "ERROR:"))]
     if any(s in salida for s in RUINA):
-        return MUERTA_ESTRUCTURAL, culpables[:6]
+        return MUERTA_ESTRUCTURAL, culpables[:20]
     if not testigos:
-        return MUERTA_SIN_TESTIGO, culpables[:6]
+        return MUERTA_SIN_TESTIGO, culpables[:20]
     if any(t in c for c in culpables for t in testigos):
-        return MUERTA, culpables[:6]
-    return MUERTA_INCIDENTAL, culpables[:6]
+        return MUERTA, culpables[:20]
+    return MUERTA_INCIDENTAL, culpables[:20]
 
 
 def probar(m: Mutacion) -> dict:
@@ -306,7 +328,7 @@ def probar(m: Mutacion) -> dict:
     _abrir_diario(ruta, original)
     try:
         ruta.write_bytes(texto.replace(m.viejo, m.nuevo, 1).encode("utf-8"))
-        paso, salida = _correr(m.suites)
+        paso, salida = _correr(m.suites, etiqueta=m.id)
     finally:
         ruta.write_bytes(original)
         if _sha(ruta.read_bytes()) != sha_original:
@@ -382,16 +404,25 @@ def main() -> int:
         for r in estruct:
             print(f"\n  ✗ MUERTA_ESTRUCTURAL · {r['id']} — rompió el módulo, no lo detectó "
                   f"una prueba. No es evidencia de que «{r['propiedad']}» esté sujeta.")
+        # En los casos NO conformes se imprime la lista COMPLETA, no `culpables[0]`.
+        # Medido el 2026-09-23: en CI, M3 salió `MUERTA_INCIDENTAL` y el informe mostraba un
+        # solo culpable, así que era imposible saber desde el log si el testigo había fallado
+        # también o no. Un diagnóstico que no deja reconstruir la decisión obliga a adivinar,
+        # y adivinar sobre el instrumento es lo que esta sonda existe para no tener que hacer.
         for r in incid:
             print(f"\n  ✗ MUERTA_INCIDENTAL · {r['id']} — la mató una prueba que NO afirma "
                   f"«{r['propiedad']}».")
-            print(f"      esperaba: {', '.join(r['testigos'])}")
-            print(f"      la mató:  {r['culpables'][0] if r['culpables'] else '(sin detalle)'}")
-            print(f"      La propiedad NO está sujeta: nadie la asevera.")
+            print(f"      esperaba a: {', '.join(r['testigos'])}")
+            print(f"      fallaron {len(r['culpables'])}:")
+            for c in r["culpables"]:
+                print(f"        {c}")
+            print("      El testigo NO está entre ellas: la propiedad no está sujeta.")
         for r in sintest:
             print(f"\n  ⊘ MUERTA_SIN_TESTIGO · {r['id']} — murió, pero no se declaró quién "
                   f"debía matarla, así que no se distingue de una muerte incidental.")
-            print(f"      la mató:  {r['culpables'][0] if r['culpables'] else '(sin detalle)'}")
+            print(f"      fallaron {len(r['culpables'])}:")
+            for c in r["culpables"]:
+                print(f"        {c}")
         for r in noap:
             print(f"\n  ⊘ NO_APLICADA · {r['id']}: {r['detalle']}")
         if buenas and o.porque:
