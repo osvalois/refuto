@@ -2,6 +2,17 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Ajustes LOCALES de cada agente. Llevan dentro la ruta ABSOLUTA del guardián —
+# `/ruta/de/quien/instala/.harness/bin/guard`— porque el gancho se escribe con la ruta
+# resuelta de esa máquina. Hasta el 2026-09-22 este repositorio no los excluía: se salvaban
+# sólo por el `~/.config/git/ignore` de quien lo tenía configurado. En otra máquina, o en CI,
+# se habrían subido con esa ruta dentro. Una exclusión que depende de la configuración
+# personal de cada uno no es una exclusión: es suerte.
+.claude/settings.local.json
+.agents/hooks.local.json
+.codex/hooks.local.json
+.kiro/hooks/*.local.json
+
 # Estado LOCAL del espacio: nunca se versiona. Así entraron notas de un cliente en
 # este repositorio antes de su primera publicación; refuto genera este mismo
 # .gitignore en cada espacio que instala (core/session.py::ensure_gitignore).

@@ -315,12 +315,12 @@ class TestElGitignoreDelEspacio(unittest.TestCase):
     def test_los_arboles_de_trabajo_no_son_especificaciones(self):
         from core.session import _specs
         with Workspace("ses-wt") as ws:
-            ws.file("ai/mneme/sdd/espacios/memoria/especificacion/requirements.md", "# r")
+            ws.file("servicios/memoria/sdd/espacios/memoria/especificacion/requirements.md", "# r")
             ws.file(".worktrees/rama/sdd/espacios/memoria/especificacion/requirements.md", "# r")
             ws.file("ai/.worktrees/sdd/espacios/memoria/especificacion/requirements.md", "# r")
             specs = _specs(ws.root)
             self.assertEqual([s.relative_to(ws.root).as_posix() for s in specs],
-                             ["ai/mneme/sdd/espacios/memoria"])
+                             ["servicios/memoria/sdd/espacios/memoria"])
 
     def test_nombre_de_sesion_lleva_el_espacio(self):
         with Workspace("ses-nombre") as ws:
@@ -354,7 +354,10 @@ class TestElGitignoreDelEspacio(unittest.TestCase):
         with Workspace("ses-viva") as ws:
             (ws.root / ".harness/state").mkdir(parents=True, exist_ok=True)
             marca = str(ws.root / ".harness/state/session-brief.md")
-            self.assertEqual(sesiones_vivas(ws.root), [])
+            v_init = sesiones_vivas(ws.root)
+            if v_init.ciego:
+                self.skipTest(f"el entorno de ejecución no permite ejecutar 'ps': {v_init.ciego}")
+            self.assertEqual(v_init, [])
             p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
                                   "--append-system-prompt-file", marca])
             try:
@@ -365,6 +368,41 @@ class TestElGitignoreDelEspacio(unittest.TestCase):
                     self.assertEqual(sesiones_vivas(otro.root), [], "confunde espacios")
             finally:
                 p.kill(); p.wait()
+
+    def test_no_poder_mirar_la_tabla_de_procesos_no_es_estar_sola(self):
+        """Falsado el 2026-09-22 leyendo el `except`, no ejecutando: `sesiones_vivas` devolvía
+        `[]` tanto cuando no había otra sesión como cuando `ps` no se podía ejecutar —y
+        `PermissionError` es un `OSError`, así que un entorno con la inspección de procesos
+        restringida caía en la misma rama—. Quien llamaba sólo avisaba si la lista traía algo:
+        la sesión abría declarando en silencio que estaba sola. Eso es una afirmación sin
+        medición, dicha por el programa que existe para no dejar hacer eso.
+
+        Las dos mitades importan: vacío-y-ciego tiene que avisar, y vacío-y-mirado NO tiene
+        que avisar, o el aviso se vuelve ruido y se deja de leer.
+        """
+        import unittest.mock as mock
+        from core.session import plan, sesiones_vivas
+        with Workspace("ses-ciega") as ws:
+            ws.manifest()
+            with mock.patch("core.session.subprocess.run",
+                            return_value=mock.Mock(stdout="123 1 python --help\n")):
+                vistas = sesiones_vivas(ws.root)
+                self.assertEqual([], vistas)
+                self.assertEqual("", vistas.ciego, "se miró de verdad: no puede declararse ciego")
+                self.assertFalse(any("no se pudo comprobar si hay otras sesiones" in w
+                                     for w in plan(ws.root, runtime="claude").warnings),
+                                 "avisa de ceguera cuando sí pudo mirar: el aviso sería ruido")
+
+            with mock.patch("core.session.subprocess.run",
+                            side_effect=PermissionError(1, "Operation not permitted")):
+                ciegas = sesiones_vivas(ws.root)
+                self.assertEqual([], ciegas)
+                self.assertIn("tabla de procesos", ciegas.ciego,
+                              "no poder mirar se devolvió como «no hay nadie»")
+                avisos = plan(ws.root, runtime="claude").warnings
+                self.assertTrue(any("no se pudo comprobar si hay otras sesiones" in w
+                                    for w in avisos),
+                                f"la sesión abrió sin decir que no lo sabía: {avisos}")
 
     def test_un_espacio_que_contiene_la_ruta_de_otro_no_es_el_mismo(self):
         # Falsado el 2026-09-21: la marca se buscaba como subcadena, y `/b/x/pub/.harness/…`

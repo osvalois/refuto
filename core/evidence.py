@@ -78,6 +78,55 @@ def write_run(workspace: Path, run_id: str, results: list, extra: dict | None = 
     return path
 
 
+def latest_verification(workspace: Path) -> dict | None:
+    """La última verificación registrada: `{run_id, verdict, gates, path, generated_at}`.
+
+    Por qué existe
+    --------------
+    `refuto verify` escribía aquí e imprimía la ruta; `refuto status` leía
+    `.harness/state/` (las ejecuciones orquestadas, `core/run.py`) y respondía **«no hay
+    ninguna ejecución registrada»** justo después. Ninguno de los dos mentía: leían dos
+    familias distintas que, hasta la identidad tipada, además se llamaban igual.
+
+    La corrección NO es fusionarlas —una sesión contiene N verificaciones y una verificación
+    puede ocurrir sin orquestación, en CI—, sino que quien informa del estado lea **las dos
+    fuentes** y las nombre por separado. Ver ADR-0012.
+
+    Devuelve `None` sólo cuando no hay ninguna. Un fichero ilegible NO se salta en silencio:
+    se declara en `unreadable`, porque «no pude leerlo» y «no existe» son cosas distintas y
+    confundirlas es el defecto que este módulo entero existe para impedir.
+    """
+    d = workspace / ".harness" / "evidence"
+    if not d.is_dir():
+        return None
+    candidatos = [p for p in d.glob("*.json") if p.name != "sbom.json"]
+    if not candidatos:
+        return None
+    unreadable = []
+    mejor = None
+    for p in sorted(candidatos, key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            unreadable.append({"path": str(p), "problem": f"{type(exc).__name__}: {exc}"})
+            continue
+        if doc.get("schema") != "harness.run/v1":
+            continue
+        mejor = {
+            "run_id": doc.get("run_id", ""),
+            "verdict": doc.get("verdict", ""),
+            "gates": {g.get("id", ""): g.get("status", "") for g in doc.get("gates", [])},
+            "generated_at": (doc.get("provenance") or {}).get("generated_at", ""),
+            "path": str(p),
+            "unreadable": unreadable,
+        }
+        break
+    if mejor is None and unreadable:
+        return {"run_id": "", "verdict": "", "gates": {}, "generated_at": "", "path": "",
+                "unreadable": unreadable}
+    return mejor
+
+
 def verdict_of(results: list) -> str:
     """Un veredicto por corrida, con las mismas palabras que las puertas.
 

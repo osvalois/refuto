@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.model import new_run_id, now, provenance, write_json
+from core.model import KIND_CONTEXT, new_id, now, provenance, write_json
 
 DIR = ".harness/context"
 
@@ -103,7 +103,7 @@ def build(workspace: Path, *, roots: list | None = None, deep: bool = False,
     from core.roles import load as load_roles, validate_registry
     from core.toolplan import plan as tool_plan
 
-    ctx = RunContext(workspace=workspace, run_id=new_run_id())
+    ctx = RunContext(workspace=workspace, run_id=new_id(KIND_CONTEXT))
     disc = discover(workspace, roots=roots, deep=deep)
     ctx.parts["environment"] = disc["environment"]
     ctx.parts["repository"] = disc["repository"]

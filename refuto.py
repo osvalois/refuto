@@ -51,7 +51,8 @@ from core import report as R                                             # noqa:
 from core.context import Context                                         # noqa: E402
 from core.evidence import read_events, verdict_of, write_run             # noqa: E402
 from core.model import (                                                 # noqa: E402
-    BLOCKED, FAIL, FUNCTIONAL, NOT_EXECUTABLE, PASS, new_run_id, now, rung, write_json,
+    BLOCKED, FAIL, FUNCTIONAL, KIND_VERIFICATION, NOT_EXECUTABLE, PASS, new_id, now, rung,
+    write_json,
 )
 from core.proc import TEXT_IO, force_utf8_io
 
@@ -885,7 +886,8 @@ def cmd_verify(opts) -> int:
     from gates.base import GATES, run_all
 
     ws = _ws(opts)
-    ctx = Context(workspace=ws, run_id=new_run_id(), deep=opts.deep, offline=opts.offline)
+    ctx = Context(workspace=ws, run_id=new_id(KIND_VERIFICATION), deep=opts.deep,
+                  offline=opts.offline)
     declared = (ctx.manifest or {}).get("gates")
     only = opts.gate or (declared if declared else None)
     unknown = [g for g in (only or []) if g not in GATES]
@@ -1444,15 +1446,35 @@ def cmd_status(opts) -> int:
     from core import humanreview as HR
     from core.run import latest, resumable
 
+    from core.evidence import latest_verification
+
     ws = _ws(opts)
     run = latest(ws)
     print(R.bold(f"\nEstado · {ws}"))
+
+    # Dos fuentes, nombradas por separado. Antes sólo se leía la orquestación y `status`
+    # respondía «no hay ninguna ejecución registrada» justo después de un `verify` que sí
+    # había dejado evidencia. Ver ADR-0012.
+    ver = latest_verification(ws)
+    if ver is None:
+        print(R.dim("  última verificación   ninguna registrada"))
+    elif ver.get("run_id"):
+        rojas = sum(1 for s in ver["gates"].values() if s in ("FAIL", "NOT_EXECUTABLE"))
+        print(f"  última verificación   {ver['run_id']} · {R.bold(ver['verdict'])}")
+        print(R.dim(f"                        {len(ver['gates'])} puertas · {rojas} en rojo · "
+                    f"{ver['generated_at'][:19]}"))
+        print(R.dim(f"                        {ver['path']}"))
+    for u in (ver or {}).get("unreadable", []):
+        print(R.paint(f"    ⊘ evidencia ilegible: {u['path']} — {u['problem']}", "33"))
+        print(R.dim("      «no pude leerlo» no es «no existe»: el estado queda sin determinar."))
+
     if run is None:
-        print(R.dim("  no hay ninguna ejecución registrada\n"))
+        print(R.dim("  última orquestación   ninguna registrada"))
     else:
         check = resumable(run)
-        print(f"  última ejecución  {run.run_id} · {R.bold(run.status)} · {run.started_at[:19]}")
-        print(f"  pasos pendientes  {len(check['pending'])}")
+        print(f"  última orquestación   {run.run_id} · {R.bold(run.status)} · "
+              f"{run.started_at[:19]}")
+        print(f"  pasos pendientes      {len(check['pending'])}")
         for d in check["drift"]:
             print(R.paint(f"    ✗ {d}", "31"))
     pend = HR.pending(ws)

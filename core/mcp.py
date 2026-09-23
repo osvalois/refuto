@@ -247,7 +247,22 @@ def interrogate_http(name: str, cfg: dict) -> ServerReport:
 
 
 # ── lectura de configuración ─────────────────────────────────────────────────────────
-def load_mcp_config(workspace: Path) -> tuple[dict, list]:
+#: Dónde puede estar declarado un servidor MCP, y **de quién es el fichero**.
+#:
+#: El ámbito no es decorativo. Un fichero del ESPACIO está en el árbol, se versiona, y lo
+#: arregla quien audita. Uno del USUARIO que ejecuta la auditoría no está en el árbol, no
+#: se versiona, y puede cambiar el veredicto sobre un espacio ajeno sin dejar rastro en él.
+#: Los dos hay que leerlos —un servidor declarado a nivel de usuario existe de verdad, y una
+#: puerta que sólo mirara el espacio aprobaría por no haber mirado—, pero cuando uno no se
+#: puede leer, el hallazgo tiene que decir cuál de los dos es: si no, quien lo recibe busca
+#: el problema en el repositorio equivocado.
+_CANDIDATOS_ESPACIO = ((".kiro", "settings", "mcp.json"), (".mcp.json",),
+                       (".vscode", "mcp.json"), (".gemini", "settings.json"),
+                       ("opencode.json",))
+_CANDIDATOS_USUARIO = ((".kiro", "settings", "mcp.json"), (".claude", "settings.json"))
+
+
+def load_mcp_config(workspace: Path, home: Path | None = None) -> tuple[dict, list]:
     """Reúne los servidores MCP declarados en el espacio, digan lo que digan los agentes.
 
     Devuelve `(servidores, ilegibles)`. **La segunda lista no es opcional.**
@@ -256,25 +271,35 @@ def load_mcp_config(workspace: Path) -> tuple[dict, list]:
     `mcp.json` corrupto desaparecía, la puerta no veía referencias, y devolvía PASS con el
     texto «nada que verificar» — el fallo silencioso exacto que esta puerta existe para
     impedir, cometido por la puerta. Lo encontró `TestGateMcp::test_entrada_corrupta`.
+
+    `home` es un parámetro, y no un `Path.home()` enterrado en el cuerpo, por lo medido el
+    2026-09-22: con `~/.claude/settings.json` ilegible, **siete** pruebas de G-MCP pasan de
+    su veredicto esperado a `NOT_EXECUTABLE`, en espacios temporales que no contienen ese
+    fichero ni pueden arreglarlo. La suite no medía «el código es correcto»: medía «el código
+    es correcto Y el `$HOME` de quien la corre es benigno», y reportaba sólo lo primero. El
+    fixture `Workspace` ya declaraba la regla que se estaba incumpliendo: «una prueba que
+    necesita los repositorios de quien la escribió para pasar no es una prueba».
+
+    En producción el valor por defecto es el de antes —el home real, que es lo correcto para
+    auditar de verdad— y no se debilita nada: un fichero ilegible sigue dando NOT_EXECUTABLE,
+    porque no poder leerlo es exactamente no poder afirmar.
     """
     servers: dict = {}
     unreadable: list = []
-    candidates = [
-        workspace / ".kiro" / "settings" / "mcp.json",
-        workspace / ".mcp.json",
-        workspace / ".vscode" / "mcp.json",
-        workspace / ".gemini" / "settings.json",
-        workspace / "opencode.json",
-        Path.home() / ".kiro" / "settings" / "mcp.json",
-        Path.home() / ".claude" / "settings.json",
-    ]
-    for path in candidates:
+    base = Path.home() if home is None else Path(home)
+    candidates = [(workspace.joinpath(*p), "espacio") for p in _CANDIDATOS_ESPACIO]
+    candidates += [(base.joinpath(*p), "usuario") for p in _CANDIDATOS_USUARIO]
+    for path, scope in candidates:
         if not path.is_file():
             continue
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            unreadable.append({"path": str(path), "problem": f"{type(exc).__name__}: {exc}"})
+            nota = "" if scope == "espacio" else (
+                " — OJO: este fichero es del USUARIO que ejecuta la auditoría, no del espacio "
+                "auditado. No está en su árbol y no se arregla desde él.")
+            unreadable.append({"path": str(path), "scope": scope,
+                               "problem": f"{type(exc).__name__}: {exc}{nota}"})
             continue
         block = doc.get("mcpServers") or doc.get("mcp") or {}
         if not isinstance(block, dict):
