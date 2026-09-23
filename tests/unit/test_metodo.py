@@ -118,3 +118,48 @@ class TestSeccion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestElJuezDelEspacioEsElDelEspacio(unittest.TestCase):
+    """Quién decide que algo está terminado, cuando el espacio trae su propio instrumento.
+
+    Medido el 2026-09-23 sobre un espacio real con motor propio: el informe traía **dos**
+    criterios de cierre incompatibles. La sección «Con qué se ejecuta» mandaba
+    `.harness/hz verify`; quince líneas después, «Cómo se sabe que terminaste» mandaba
+    `refuto.py verify`, con el vocabulario `PASS/FAIL/BLOCKED/NOT_EXECUTABLE` frente a la
+    escala `E0–E5` que ese mismo informe acababa de declarar.
+
+    El agente no elige entre los dos: los intenta. Y lo que decide si su trabajo cuenta es el
+    instrumento del espacio, no el de quien le abrió la sesión.
+    """
+
+    def test_con_instrumento_propio_el_criterio_es_ese(self):
+        from core.session import build_brief
+        with Workspace("met-propio") as ws:
+            ws.policy()
+            (ws.root / ".harness").mkdir(parents=True, exist_ok=True)
+            ws.json(".harness/pipeline.json", {
+                "schema": "espacio:pipeline:v1",
+                "etapas": [{"nombre": "AUDIT", "porque": "qué puede salir"}],
+            })
+            hz = ws.root / ".harness" / "hz"
+            hz.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+            texto = build_brief(ws.root, runtime="claude")[0]
+            cierre = texto[texto.index("## Cómo se sabe que terminaste"):]
+            self.assertIn(".harness/hz verify", cierre,
+                          "el instrumento del espacio no aparece como criterio de cierre")
+            self.assertIn("no es el juez de este espacio", cierre,
+                          "no se declara que refuto NO juzga aquí")
+            self.assertNotIn("`BLOCKED` no aprueba", cierre,
+                             "se impone el vocabulario de refuto sobre un espacio que "
+                             "declaró el suyo")
+
+    def test_sin_instrumento_propio_manda_refuto(self):
+        """La otra mitad: donde no hay método declarado, el criterio sigue siendo el de refuto."""
+        from core.session import build_brief
+        with Workspace("met-sin") as ws:
+            ws.policy()
+            cierre = build_brief(ws.root, runtime="claude")[0]
+            cierre = cierre[cierre.index("## Cómo se sabe que terminaste"):]
+            self.assertIn("`BLOCKED` no aprueba", cierre)
+            self.assertNotIn("no es el juez de este espacio", cierre)

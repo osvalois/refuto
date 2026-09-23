@@ -31,6 +31,7 @@ from pathlib import Path
 
 from core.evidence import append_event
 from core.model import KIND_SESSION, new_id, now
+from core import metodo as _metodo
 from core.proc import TEXT_IO, interpreter
 
 
@@ -852,18 +853,50 @@ def build_brief(workspace: Path, *, runtime: str, role_id: str = "",
              f"Invócalo por su ruta completa; `python3 refuto.py` aquí no existe.")
     L.append("")
 
-    L += ["## Cómo se sabe que terminaste", "",
-          "No por que lo digas. Se ejecutan puertas con cuatro estados —`PASS`, `FAIL`, "
-          "`BLOCKED`, `NOT_EXECUTABLE`— y **`BLOCKED` no aprueba**: significa que algo no se "
-          "pudo comprobar, que no es lo mismo que estar bien.", ""]
-    if res["comandos"]:
-        L += ["Comprobado con estos comandos, que existen y funcionan desde este directorio:",
-              "", "```bash"]
-        ancho = max((len(c) for c, _ in res["comandos"]), default=0) + 2
-        L += [f"{cmd:<{ancho}}# {porque}" for cmd, porque in res["comandos"]]
-        L += ["```", ""]
+    # Quién decide aquí que algo está terminado: el método del espacio si lo declara, refuto
+    # si no.
+    #
+    # Antes esto era un bloque fijo con las órdenes de refuto, siempre. En un espacio con motor
+    # propio el informe salía contradiciéndose: la sección «Con qué se ejecuta» decía
+    # `.harness/hz verify` y quince líneas después ésta mandaba `refuto.py verify`, con un
+    # vocabulario de estados distinto —`PASS/FAIL/BLOCKED/NOT_EXECUTABLE` frente a la escala
+    # `E0–E5` que el propio espacio acababa de declarar—. Medido el 2026-09-23 en un espacio
+    # con instrumento propio: 171 líneas de informe y dos criterios de cierre incompatibles.
+    #
+    # El agente no elige entre los dos: los intenta. Y lo que decide si su trabajo cuenta es el
+    # instrumento del espacio, no el de quien le abrió la sesión. Un motor que se declara juez
+    # de un espacio que ya tiene el suyo no está gobernando: está pisando.
+    metodo_propio = _metodo.leer(workspace)
+    L += ["## Cómo se sabe que terminaste", ""]
+    if metodo_propio.instrumento:
+        L += [f"**Lo decide el instrumento de este espacio, no refuto.** `{workspace.name}` "
+              f"declara su propio método en `.harness/` y su propio vocabulario de evidencia; "
+              f"quien dice si una etapa cerró es:", "",
+              "```bash",
+              f"{metodo_propio.instrumento} verify     # verifica la cadena entera",
+              f"{metodo_propio.instrumento} status     # último cierre por etapa",
+              "```", "",
+              "No declares nada terminado con otra herramienta. Refuto abrió esta sesión y "
+              "aplica la política de escritura, pero **no es el juez de este espacio**: usar "
+              "sus puertas aquí daría un veredicto en un vocabulario que este trabajo no usa.",
+              ""]
+        if res["comandos"]:
+            L += ["<details><summary>refuto también está disponible, como herramienta, no como "
+                  "criterio</summary>", "", "```bash"]
+            L += [f"{cmd}  # {porque}" for cmd, porque in res["comandos"]]
+            L += ["```", "</details>", ""]
     else:
-        L += ["_(No se encontró ningún verificador invocable desde este espacio.)_", ""]
+        L += ["No por que lo digas. Se ejecutan puertas con cuatro estados —`PASS`, `FAIL`, "
+              "`BLOCKED`, `NOT_EXECUTABLE`— y **`BLOCKED` no aprueba**: significa que algo no "
+              "se pudo comprobar, que no es lo mismo que estar bien.", ""]
+        if res["comandos"]:
+            L += ["Comprobado con estos comandos, que existen y funcionan desde este "
+                  "directorio:", "", "```bash"]
+            ancho = max((len(c) for c, _ in res["comandos"]), default=0) + 2
+            L += [f"{cmd:<{ancho}}# {porque}" for cmd, porque in res["comandos"]]
+            L += ["```", ""]
+        else:
+            L += ["_(No se encontró ningún verificador invocable desde este espacio.)_", ""]
 
     if warnings:
         L += ["## Avisos", ""] + [f"- {w}" for w in warnings] + [""]
