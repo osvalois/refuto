@@ -24,8 +24,8 @@ Estados permitidos para una comprobación: `PASS` `FAIL` `BLOCKED` `NOT_RUN` `IN
 
 | Afirmación | Nivel | Evidencia |
 |---|---|---|
-| La suite completa pasa | `E3` | `python3 refuto.py selftest` → **478/478, 1 omitida** (sólo Windows). 2026-09-22, macOS arm64, Python 3.14.6 y 3.12 |
-| Reparto por suite | `E2` | `grep -rc "def test_" tests/<suite>`: unit 366 · contract 19 · selftest 66 · adversarial 27 |
+| La suite completa pasa | `E3` | `python3 refuto.py selftest` → **580/580, 1 omitida** (sólo Windows), 268 s. 2026-09-23, macOS arm64, Python 3.14.6. La cifra anterior, 478/478, es del 2026-09-22 |
+| Reparto por suite | `E2` | unit 409 · contract 26 · selftest 72 · adversarial 73 = **580**, contado con `ast` sobre los métodos de clase. `grep -rc "def test_"` da 581: cuenta un `def test_` que vive **dentro de una cadena** en `tests/unit/test_corredor.py:102`, donde esa prueba fabrica una suite desechable. El total del corredor es la autoridad; el `grep` sobrecuenta |
 | 13 puertas registradas | `E2` | `gates/base.py::GATES` |
 | 22 roles en 9 grupos | `E2` | `roles/registry.json` |
 | 13 fases del ciclo | `E2` | `core.lifecycle.PHASES` |
@@ -34,7 +34,10 @@ Estados permitidos para una comprobación: `PASS` `FAIL` `BLOCKED` `NOT_RUN` `IN
 | `Result` no admite `PASS` con hallazgos | `E3` | `tests/contract/test_result_contract.py` |
 | Un adapter sin política no puede declarar `unenforceable: []` | `E3` | `tests/contract/test_result_contract.py` |
 | El lock: `verify()` no escribe, el ancla es un SHA, una etiqueta movida da `FAIL` | `E3` | `tests/adversarial/test_attacks.py` |
-| 27 pruebas adversariales existen y pasan en local | `E3` | `grep -c "def test_" tests/adversarial/test_attacks.py` → 27; incluidas en el 478/478 |
+| 27 pruebas adversariales existen y pasan en local | `E3` | `grep -c "def test_" tests/adversarial/test_attacks.py` → 27; incluidas en el 580/580. La suite adversarial entera son 73: las otras 46 atacan la herencia de política |
+| La herencia de política llega al **guardián**, no sólo a un comando de consulta | `E4` | `tests/adversarial/test_herencia_efectiva.py` ejecuta `core.guard` como proceso y lee su decisión: una regla que sólo está en el padre deniega, y dos controles (`allow`) impiden cerrarlo con un «deniega todo». 2026-09-23 |
+| Un hijo no puede retirar ni ensanchar lo del padre | `E3` | `tests/adversarial/test_monotonia.py` (10 ataques) y `test_violaciones_refinamiento.py` (5 violaciones encontradas auditando, 3 cerradas y 2 declaradas abiertas) |
+| El esquema de política publicado describe lo que el programa produce | `E3` | `tests/contract/test_policy_schema.py`: valida 7+ documentos reales, con control de que el validador no está mudo y guarda contra deriva de campos |
 | El guardián bloquea una escritura sobre el juez en dos runtimes con vocabulario incompatible | `E4`, **n=1** | 2026-08-27, macOS arm64, `claude 2.1.247` y `kiro 2.20.0`. [`validation/informe.md`](validation/informe.md) |
 | Un agente real escribió una prueba que cita su requisito y pasa, bajo puertas y con tope de gasto | `E4`, **n=1** | 2026-08-27, `claude 2.1.247`, fase `TEST`. [`examples/end-to-end-run.md`](examples/end-to-end-run.md) |
 
@@ -103,8 +106,20 @@ una versión.
 ## Cómo reproducir las cifras de este documento
 
 ```bash
-python3 refuto.py selftest                              # 478/478, 1 omitida
-grep -rc "def test_" tests/unit tests/contract tests/selftest tests/adversarial
+python3 refuto.py selftest                              # 580/580, 1 omitida
+
+# Reparto por suite. `grep -rc "def test_"` sobrecuenta: recoge un `def test_` que vive dentro
+# de una cadena. Lo que unittest recoge son los métodos de clase, así que se cuentan con `ast`.
+python3 -c "
+import ast, collections, pathlib
+t = collections.Counter()
+for p in pathlib.Path('tests').rglob('*.py'):
+    for c in ast.parse(p.read_text(encoding='utf-8')).body:
+        if isinstance(c, ast.ClassDef):
+            t[p.parts[1]] += sum(1 for m in c.body
+                                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                 and m.name.startswith('test_'))
+print(dict(t), sum(t.values()))"
 python3 -c "from gates.base import GATES; print(len(GATES))"
 python3 -c "from core.lifecycle import PHASES; print(len(PHASES))"
 python3 -c "import json;print(len(json.load(open('roles/registry.json'))['roles']))"

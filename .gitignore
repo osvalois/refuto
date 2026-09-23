@@ -16,10 +16,16 @@ __pycache__/
 # Estado LOCAL del espacio: nunca se versiona. Así entraron notas de un cliente en
 # este repositorio antes de su primera publicación; refuto genera este mismo
 # .gitignore en cada espacio que instala (core/session.py::ensure_gitignore).
-.harness/evidence/
-.harness/state/
-.harness/context/
-.harness/memory/
-.harness/backup/
-.harness/bin/
-.harness/binding.json
+#
+# Con `**/` a propósito, y corregido el 2026-09-23. Un patrón con una `/` intermedia lo ancla
+# git al directorio de este fichero, así que `.harness/evidence/` NO alcanzaba un `.harness/`
+# anidado — y `examples/` tiene tres. Un diario de validación se coló en el índice por ahí.
+# El espacio de ejemplo que nace de `refuto init` se salvaba sólo porque init le escribe su
+# propio `.gitignore`; un árbol montado a mano no tiene esa red.
+**/.harness/evidence/
+**/.harness/state/
+**/.harness/context/
+**/.harness/memory/
+**/.harness/backup/
+**/.harness/bin/
+**/.harness/binding.json

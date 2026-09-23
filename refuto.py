@@ -395,6 +395,57 @@ def cmd_memory(opts) -> int:
     return EXIT_USAGE
 
 
+def _politica_inicial(ctx, ws: Path, opts) -> tuple:
+    """Escribe la política de un espacio nuevo. Con `--extends`, un hijo; sin él, la copia.
+
+    Devuelve `(ok, detalle)`. **Nunca deja escrito un documento que no resuelva**: si la cadena
+    no se puede construir, no se escribe nada y se dice por qué. El orden importa — comprobar
+    después de escribir dejaría un `.harness/policy.json` que existe y no gobierna, y el paso
+    siguiente de `install` lo daría por hecho porque el fichero está ahí.
+    """
+    from core.policy import Policy, PoliticaIlegible
+    from core.refinement import documento_hijo, referencia_a
+
+    if ctx.policy_path.exists() and not getattr(opts, "force", False):
+        return True, f"{ctx.policy_path.relative_to(ws)} (ya existía; `--force` la reescribe)"
+
+    ref = getattr(opts, "extends", "") or ""
+    if not ref:
+        write_json(ctx.policy_path, Policy.default().to_dict())
+        return True, f"{ctx.policy_path.relative_to(ws)} (copia autónoma, sin herencia)"
+
+    padre = Path(ref).expanduser()
+    if not padre.is_absolute():
+        # Relativa al directorio del fichero HIJO, no al directorio actual. Es la única base
+        # que no miente: `referencia_a` (abajo) guarda `extends` relativo a `harness_dir`, así
+        # que con cualquier otra base lo que se teclea y lo que queda escrito son rutas
+        # distintas. Con `--workspace`, CWD ni siquiera está en el árbol del espacio.
+        padre = ctx.harness_dir / padre
+    if not padre.is_file():
+        return False, (f"`--extends {ref}` no es un fichero ({padre}). Las rutas relativas se "
+                       f"resuelven desde {ctx.harness_dir}, que es el directorio del hijo. No "
+                       f"se escribe nada: un espacio que dice heredar y corre sin su padre "
+                       f"parece gobernado sin estarlo. Materialice la capa base con "
+                       f"`refuto policy base`.")
+    try:
+        padre_doc = json.loads(padre.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, (f"el padre «{ref}» existe y no se pudo leer ({type(exc).__name__}: "
+                       f"{exc}). No poder leerlo no es no tenerlo.")
+
+    doc = documento_hijo(ws.name, referencia_a(padre, desde=ctx.harness_dir),
+                         padre_doc=padre_doc if getattr(opts, "anchor", False) else None)
+    try:
+        from core.refinement import politica_efectiva
+        politica_efectiva(ctx.policy_path, doc)
+    except PoliticaIlegible as exc:
+        return False, f"la cadena no resuelve, así que no se escribe: {exc}"
+
+    write_json(ctx.policy_path, doc)
+    anclada = " · anclada al digest del padre" if "extends_digest" in doc else ""
+    return True, f"{ctx.policy_path.relative_to(ws)} → hereda de «{doc['extends']}»{anclada}"
+
+
 # ── install ─────────────────────────────────────────────────────────────────────────
 def cmd_install(opts) -> int:
     """Deja un espacio operativo de principio a fin, en un solo comando.
@@ -425,9 +476,10 @@ def cmd_install(opts) -> int:
     except OSError as exc:
         paso("estructura", False, f"{exc}. Compruebe permisos: `refuto doctor`.")
         return EXIT_FAIL
-    if not ctx.policy_path.exists() or opts.force:
-        write_json(ctx.policy_path, Policy.default().to_dict())
-    paso("política", ctx.policy_path.is_file(), str(ctx.policy_path.relative_to(ws)))
+    ok_pol, detalle_pol = _politica_inicial(ctx, ws, opts)
+    paso("política", ok_pol and ctx.policy_path.is_file(), detalle_pol)
+    if not ok_pol:
+        return EXIT_FAIL
 
     if not ctx.manifest_path.exists() or opts.force:
         from gates.base import GATES
@@ -725,16 +777,18 @@ def cmd_bind(opts) -> int:
 
 # ── init ─────────────────────────────────────────────────────────────────────────────
 def cmd_init(opts) -> int:
-    from core.policy import Policy
-
     ws = _ws(opts)
     ctx = Context(workspace=ws)
     ctx.harness_dir.mkdir(parents=True, exist_ok=True)
     ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
 
     created = []
-    if not ctx.policy_path.exists() or opts.force:
-        write_json(ctx.policy_path, Policy.default().to_dict())
+    ya_estaba = ctx.policy_path.exists() and not opts.force
+    ok_pol, detalle_pol = _politica_inicial(ctx, ws, opts)
+    if not ok_pol:
+        print(R.paint(f"  ✗ política · {detalle_pol}", "31"))
+        return EXIT_FAIL
+    if not ya_estaba:
         created.append(ctx.policy_path)
     if not ctx.manifest_path.exists() or opts.force:
         from gates.base import GATES
@@ -924,13 +978,66 @@ def cmd_policy(opts) -> int:
     from adapters.registry import ADAPTERS, all_specs
     from core.policy import Policy, compile_for
 
+    from core.policy import PoliticaIlegible
+
     ws = _ws(opts)
     ctx = Context(workspace=ws)
-    policy = Policy.from_dict(ctx.policy_doc) if ctx.policy_doc else Policy.default()
+
+    if opts.action == "base":
+        # Emite la capa 1 por la SALIDA, no la escribe. Su sitio es `policies/base.json`, que
+        # la política de refuto protege: materializar la norma de la que cuelgan todos los
+        # clientes es un acto de persona. Un agente que pudiera reescribirla no estaría
+        # gobernado por ella — y este comando corre dentro de un agente.
+        from core.policy import RUTA_BASE, documento_base
+
+        if not opts.json:
+            print(R.dim(f"\n  # la capa 1 de refuto → cliente → proyecto. Redirija a "
+                        f"{RUTA_BASE} para materializarla.\n"))
+        print(json.dumps(documento_base(), ensure_ascii=False, indent=2))
+        return EXIT_OK
+
+    # `Policy.load`, no `from_dict`: es la vía que resuelve `extends` y la que usa el
+    # guardián. Con `from_dict` este comando mostraba y compilaba la política del hijo SIN su
+    # padre — una segunda interpretación de la misma política, que es lo que este trabajo
+    # existe para eliminar.
+    fichero = ws / ".harness" / "policy.json"
+    try:
+        policy = Policy.load(fichero) if fichero.is_file() else Policy.default()
+    except PoliticaIlegible as exc:
+        # No revienta con un traceback: `policy refine` existe precisamente para
+        # diagnosticar estos documentos, así que tiene que poder ejecutarse sobre ellos.
+        print(R.paint(f"\n  ✗ NOT_EXECUTABLE · {exc}\n", "31"))
+        return EXIT_FAIL
 
     if opts.action == "show":
         print(json.dumps(policy.to_dict(), ensure_ascii=False, indent=2))
         return EXIT_OK
+
+    if opts.action == "refine":
+        # Resuelve `extends` y MUESTRA la política efectiva con su identidad. No cambia cómo
+        # se carga la política en el resto del programa: hacerlo en silencio convertiría un
+        # cambio de contrato en un efecto secundario. Ver
+        # docs/architecture/HERENCIA-REFUTO-CLIENTE-PROYECTO.md.
+        from core.refinement import explicar
+
+        # `explicar` llama a `politica_efectiva`, que es lo que ejecuta
+        # `Policy.load` y por tanto el guardián. Una segunda PRESENTACIÓN de la
+        # misma resolución es útil; una segunda SEMÁNTICA es el defecto.
+        r = explicar(fichero, ctx.policy_doc or {})
+        if opts.json:
+            print(json.dumps(r.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            simbolo = R.paint("✓", "32") if r.status == "PASS" else R.paint("✗", "31")
+            print(f"\n  {simbolo} {R.bold(r.status)} · {r.motivo}")
+            if r.identidad:
+                print(f"    identidad   {r.identidad.nombre}@{r.identidad.version}")
+                print(f"    digest      {r.identidad.digest[:16]}…")
+                print(f"    efectivo    {r.identidad.efectivo[:16]}…  "
+                      f"{R.dim('(encadena al padre: si el padre cambia, esto cambia)')}")
+            for v in r.violaciones:
+                print(R.paint(f"    ✗ {v}", "31"))
+            print()
+        return EXIT_OK if r.status == "PASS" else EXIT_FAIL
 
     if opts.action == "prune":
         from core import hygiene
@@ -1511,6 +1618,24 @@ class UsageParser(argparse.ArgumentParser):
         self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
 
 
+def _args_herencia(sp) -> None:
+    """Los argumentos de herencia de `init` e `install`, en un solo sitio.
+
+    Duplicarlos en dos parsers es cómo dos comandos que deben crear el mismo documento acaban
+    creando dos distintos: alguien añade una opción a uno y el otro sigue funcionando, así que
+    nada falla y la divergencia no se nota hasta que un espacio nace sin heredar.
+    """
+    sp.add_argument("--extends", default="", metavar="RUTA",  # relativa a `<espacio>/.harness/`
+                    help="ruta del documento padre, relativa a `<espacio>/.harness/` (o "
+                         "absoluta). El espacio nace HEREDANDO en vez de con una copia completa "
+                         "de la norma. Para un cliente, la capa base de refuto (`refuto policy "
+                         "base`); para un proyecto, la política de su cliente.")
+    sp.add_argument("--anchor", action="store_true",
+                    help="con `--extends`: fija `extends_digest` al padre de hoy. A partir de "
+                         "ahí, cualquier cambio del padre deja de resolver hasta que alguien "
+                         "lo revise. Sin esta opción el hijo sigue al padre.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = UsageParser(prog="refuto", description=__doc__,
                     formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1577,6 +1702,7 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--no-bind", action="store_true")
     ins.add_argument("--deep", action="store_true")
     ins.add_argument("--force", action="store_true")
+    _args_herencia(ins)
     ins.set_defaults(func=cmd_install)
 
     b = sub.add_parser("bind", help="ata este espacio a un núcleo y a un repositorio")
@@ -1590,6 +1716,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     i = sub.add_parser("init", help="crea .harness/ en este espacio")
     i.add_argument("--force", action="store_true")
+    _args_herencia(i)
     i.set_defaults(func=cmd_init)
 
     up = sub.add_parser("upgrade", aliases=["actualizar"],
@@ -1607,8 +1734,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     po = sub.add_parser("policy", help="compila la política canónica a cada runtime; `prune` retira reglas de permiso podridas")
     po.add_argument("action",
-                    choices=["show", "plan", "compile", "wire", "unwire", "audit", "prune"])
+                    choices=["show", "base", "refine", "plan", "compile", "wire", "unwire",
+                             "audit", "prune"])
     po.add_argument("--agent", action="append", default=[])
+    po.add_argument("--json", action="store_true",
+                    help="con `refine`: la política efectiva y su identidad en JSON")
     po.add_argument("--dry-run", action="store_true")
     po.add_argument("--repos", action="store_true",
                     help="con `wire`: engancha tambien cada repositorio del espacio, todos al "

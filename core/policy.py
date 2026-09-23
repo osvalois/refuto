@@ -118,6 +118,19 @@ class PoliticaIlegible(ValueError):
     """
 
 
+class HerenciaIrresoluble(PoliticaIlegible):
+    """No se pudo construir la política efectiva a partir de `extends`.
+
+    Subclase a propósito: el guardián ya captura `PoliticaIlegible` y **deniega**. Heredar de
+    ella hace que un fallo de herencia falle CERRADO sin tocar una línea del guardián, que es
+    el sitio donde un `except` nuevo y mal puesto costaría más caro.
+
+    Las tres razones se distinguen en el mensaje, no en el estado: quien lo recibe necesita
+    saber cuál es, pero para el motor las tres significan lo mismo — no se puede afirmar cuál
+    es la política, luego no se deja pasar nada.
+    """
+
+
 @dataclass
 class Policy:
     """La política canónica. Un documento, N compilaciones."""
@@ -225,10 +238,19 @@ class Policy:
         # `schema` y `version` son METADATOS: los lleva cualquier documento, incluido el de
         # otro programa, así que reconocerlos no es reconocer una política. Contarlos salvaba
         # justo al documento que este control existe para cazar.
+        #
+        # `extends` SÍ cuenta, y es lo contrario de un metadato: es una declaración
+        # sustantiva —«mi política es la de mi padre, con lo que yo añada»— y un documento
+        # ajeno no la lleva. Sin esto, un hijo que hereda TODO y no repite nada se rechazaba
+        # como documento de otro programa; medido el 2026-09-23 contra el guardián real, que
+        # denegaba con el motivo equivocado. `name` acompaña a `extends` en la identidad y no
+        # cuenta por sí solo, como `schema`.
         sustantivas = set(kwargs) - {"schema", "version"}
+        if doc.get("extends"):
+            sustantivas.add("extends")
         if doc and not sustantivas:
             ajenas = sorted(k for k in doc if not k.startswith("_") and k not in
-                            ("schema", "version"))
+                            ("schema", "version", "name", "extends_digest"))
             raise PoliticaIlegible(
                 f"el documento declara {len(ajenas)} campos de política y el motor no reconoce "
                 f"ninguno: "
@@ -241,11 +263,69 @@ class Policy:
 
     @classmethod
     def load(cls, path: Path) -> "Policy":
-        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        """La política EFECTIVA de ese fichero, con `extends` ya resuelto.
+
+        Por qué la resolución vive aquí y no en un comando aparte
+        ---------------------------------------------------------
+        `Policy.load` es lo que ejecuta el guardián (`core/guard.py`) antes de decidir cada
+        escritura y cada orden. Si `extends` se resolviera sólo en un comando de consulta, un
+        cliente podría declarar restricciones que **ningún proyecto aplica** mientras la
+        herramienta informa de que la herencia está bien.
+
+        No es hipotético: medido el 2026-09-23 contra el guardián real, con un padre que
+        denegaba una orden y un hijo que declaraba `extends` sin repetirla:
+
+            permissionDecision: "allow"      ← la orden del cliente se permitía
+
+        Dos interpretaciones de la misma política son dos políticas. Aquí hay una.
+
+        Qué pasa cuando no se puede resolver
+        ------------------------------------
+        Se levanta `PoliticaIlegible` —o una de sus subclases— y el guardián la trata como ya
+        trataba cualquier política que no entiende: **deniega**. No hay valores por omisión,
+        no hay política del hijo a secas, no hay `NOT_APPLICABLE`. Un espacio que dice heredar
+        y corre sin su padre parece gobernado sin estarlo, y ése es el estado que no puede
+        existir.
+        """
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not doc.get("extends"):
+            pol = cls.from_dict(doc)
+            # También sin herencia lleva identidad: si sólo la llevaran las heredadas, la
+            # evidencia podría citar la política en unos espacios y no en otros, y «no hay
+            # digest» sería indistinguible de «no se pudo calcular».
+            from core.refinement import identidad_de
+            pol.identidad_efectiva = identidad_de(doc)
+            return pol
+        # Tardío a propósito: `refinement` importa de este módulo. Importar aquí evita el
+        # ciclo sin partir ninguno de los dos en un tercero artificial.
+        from core.refinement import politica_efectiva
+        return politica_efectiva(path, doc)
 
     @classmethod
     def default(cls) -> "Policy":
         return cls()
+
+
+#: Dónde vive la capa 1 de la cadena `refuto → cliente → proyecto`, relativa a la raíz de
+#: refuto. Está bajo `policies/**`, que la propia política de refuto protege — y eso es
+#: deliberado, no un estorbo: materializar la norma raíz es un acto de persona. Un agente que
+#: pudiera reescribir el documento del que cuelgan todos los clientes no estaría gobernado por
+#: él.
+RUTA_BASE = "policies/base.json"
+
+
+def documento_base(nombre: str = "refuto") -> dict:
+    """El documento de la capa `refuto`: los valores por omisión, materializados.
+
+    Hasta ahora esta capa sólo existía como constantes de este módulo (`DEFAULT_PROTECTED`,
+    `DEFAULT_COMMAND_DENY`…), así que ningún cliente podía extenderla: `refuto install`
+    escribía una COPIA completa en cada espacio y a partir de ahí divergían en silencio. Un
+    documento se puede heredar; una constante de Python, no.
+
+    Se deriva de `Policy.default()` y no se escribe a mano a propósito: dos fuentes para la
+    misma norma se separan, y la que se separa sin avisar es siempre la que nadie ejecuta.
+    """
+    return {**Policy.default().to_dict(), "name": nombre}
 
 
 # ── decisión ─────────────────────────────────────────────────────────────────────────

@@ -169,6 +169,46 @@ MUTACIONES = [
         suites=["unit", "adversarial", "selftest"],
     ),
 
+    Mutacion(
+        id="M7",
+        fichero="core/policy.py",
+        viejo="        if not doc.get(\"extends\"):",
+        nuevo="        if True or not doc.get(\"extends\"):",
+        propiedad="la política efectiva que aplica el guardián resuelve `extends`",
+        camino="herencia analizable pero no vigente: el cliente declara restricciones y "
+               "ningún proyecto las aplica, mientras la herramienta informa de que la "
+               "herencia está bien",
+        suites=["adversarial"],
+        testigos=("test_una_regla_que_SOLO_esta_en_el_padre_se_aplica",),
+    ),
+
+    Mutacion(
+        id="M8",
+        fichero="core/guard.py",
+        viejo="    return ident.efectivo if ident else \"\"",
+        nuevo="    return \"\"",
+        propiedad="cada decisión del guardián cita la política efectiva que la produjo",
+        camino="evidencia sin procedencia de política: se sabe QUÉ regla denegó y no de qué "
+               "política salió — y con herencia la regla pudo venir del cliente",
+        suites=["unit"],
+        testigos=("test_una_denegacion_lleva_el_digest_efectivo",),
+    ),
+
+    Mutacion(
+        id="M9",
+        fichero="refuto.py",
+        viejo="    write_json(ctx.policy_path, doc)",
+        nuevo="    write_json(ctx.policy_path, {**Policy.default().to_dict(), **doc})",
+        propiedad="un espacio que se da de alta heredando declara lo SUYO y nada más",
+        camino="la copia vuelve por la puerta de atrás: el hijo hereda Y arrastra la norma "
+               "entera del padre. Todo sigue funcionando —la cadena resuelve, el guardián "
+               "deniega igual— y por eso no lo ve ninguna prueba de comportamiento. Lo que se "
+               "pierde es que lo copiado diverge en silencio en cuanto alguien lo toca, que "
+               "es el defecto que la herencia existía para cerrar",
+        suites=["adversarial"],
+        testigos=("test_el_hijo_declara_lo_suyo_y_NADA_mas",),
+    ),
+
     # ── controles de la propia sonda ────────────────────────────────────────────────
     #
     # Sin éstos, «6/6 MUERTAS» no es un resultado: es una cifra sin instrumento calibrado.
