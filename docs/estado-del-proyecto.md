@@ -71,7 +71,7 @@ para decir «aquí no aplica», que semánticamente es `NOT_APPLICABLE`; `gates/
 comportamiento:
 
 - `gates/g_mcp.py`: sin servidores declarados devuelve `PASS` «nada que verificar». Hay una
-  prueba que **exige** ese `PASS` (`tests/selftest/test_gates.py::test_positivo_sin_referencias`),
+  prueba que **exige** ese `PASS` (`tests/selftest/test_gates.py::test_sin_referencias_no_aplica_y_NO_aprueba`),
   así que arreglarlo obliga a cambiarla.
 - `tests/runner.py`: con 0 pruebas ejecutadas sale con `0`. Medido el 2026-09-21:
   `python3 refuto.py --verbose selftest --suite zzz` → `NO TESTS RAN` y `exit=0`. Es un aprobado

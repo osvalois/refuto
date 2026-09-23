@@ -22,14 +22,14 @@ sustituye**: aporta el diagnóstico medido que ADR-0009 no tiene y que su implem
 necesita — cuántos acuñadores hay, dónde aterriza cada uno y cuántos enlaces existen.
 
 Una divergencia que hay que resolver al implementar: ADR-0009 declara el formato
-`run-20260922-152000-a1b2c3d4`; el código emite `run_<hex16>` (`core/model.py:235`). Medido el
+`run-20260922-152000-a1b2c3d4`; el código emite `run_<hex16>` (`core/model.py::new_run_id`). Medido el
 2026-09-22: **ninguno** de los ocho identificadores que ADR-0009 declara (`CanonicalEvent`,
 `git_tree_hash`, `policy_hash`, `seq`, …) aparece en el árbol. ADR-0009 describe un destino,
 no un estado.
 
 ## Contexto — lo medido, no lo recordado
 
-`core/model.py:235` define **un** generador:
+`core/model.py::new_run_id` define **un** generador:
 
 ```python
 def new_run_id() -> str:
@@ -41,10 +41,10 @@ distinto:
 
 | # | acuñador | entidad | almacén | enlaces salientes |
 |---|---|---|---|---|
-| 1 | `core/run.py:168` | ejecución orquestada | `.harness/state/run_<id>.json` | `context_run_id` |
-| 2 | `core/session.py:879` | sesión interactiva | eventos `session/*` del ledger | ninguno |
-| 3 | `core/runcontext.py:106` | contexto construido | `.harness/context/` | ninguno |
-| 4 | `refuto.py:888` | verificación | `.harness/evidence/<id>.json` | ninguno |
+| 1 | `core/run.py::plan` | ejecución orquestada | `.harness/state/run_<id>.json` | `context_run_id` |
+| 2 | `core/session.py::plan` | sesión interactiva | eventos `session/*` del ledger | ninguno |
+| 3 | `core/runcontext.py::build` | contexto construido | `.harness/context/` | ninguno |
+| 4 | `refuto.py::cmd_verify` | verificación | `.harness/evidence/<id>.json` | ninguno |
 
 De seis enlaces posibles entre las cuatro, existe **uno**.
 

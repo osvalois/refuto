@@ -66,6 +66,12 @@ jobs:
       - name: Esquemas dentro del subconjunto soportado
         run: python3 scripts/check_schemas.py
 
+      - name: Las citas a código apuntan a lo que dicen
+        # Un número de línea envejece en silencio: el fichero crece por encima y la cita se
+        # queda señalando otra cosa, o nada. Medido el 2026-09-23 en este repositorio: de 16
+        # citas, 16 resolvían y 6 mentían — tres apuntaban a una línea en blanco.
+        run: python3 scripts/check_citas.py
+
       - name: Aseguramiento de diagramas de arquitectura
         run: |
           python3 scripts/generate_architecture_diagrams.py

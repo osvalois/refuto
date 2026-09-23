@@ -23,7 +23,7 @@ lo que declaran existe. La columna de la derecha es medida, no recordada.
 
 | ADR | Decisión | Implementación, medida el 2026-09-22 |
 |---|---|---|
-| [0009](ADR-0009-canonical-run-and-event-model.md) | Modelo canónico de corrida y eventos | **`NOT_RUN`** — 0 de 8 identificadores en el árbol (`CanonicalEvent`, `git_tree_hash`, `policy_hash`, `seq`, `ULID`…). El formato que declara (`run-AAAAMMDD-HHMMSS-hex`) no es el que emite `core/model.py:235` (`run_<hex16>`) |
+| [0009](ADR-0009-canonical-run-and-event-model.md) | Modelo canónico de corrida y eventos | **`NOT_RUN`** — 0 de 8 identificadores en el árbol (`CanonicalEvent`, `git_tree_hash`, `policy_hash`, `seq`, `ULID`…). El formato que declara (`run-AAAAMMDD-HHMMSS-hex`) no es el que emite `core/model.py::new_run_id` (`run_<hex16>`) |
 | [0010](ADR-0010-evidence-graph-and-evaluation-plane.md) | Grafo de evidencia y plano de evaluación | **`NOT_RUN`** — 0 de 4 identificadores (`EvidenceGraph`, `evaluation_plane`…) |
 | [0011](ADR-0011-trust-boundaries-and-flow-separation.md) | Fronteras de confianza y separación de flujos | **`NOT_RUN`** — 0 de 2 identificadores (`TrustBoundary`, `trust_boundary`) |
 | [0012](ADR-0012-identidad-de-ejecucion.md) | Identidad tipada y correlación entre ejecuciones | **`NOT_RUN`** — refina 0009 con el diagnóstico medido: 4 acuñadores de `run_<hex16>`, 1 enlace de 6 posibles. Sus 5 pruebas están declaradas y ninguna existe |

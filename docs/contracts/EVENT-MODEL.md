@@ -15,13 +15,13 @@ python3 -c "…collections.Counter(kind) sobre .harness/evidence/ledger.jsonl…
 
 | tipo | emisor | observados |
 |---|---:|---:|
-| `policy/decision` | `core/guard.py:137` | 114 |
-| `run/complete` | `core/evidence.py:75` | 2 |
-| `session/open` | `core/session.py:1054` | 1 |
-| `session/close` | `core/session.py:1065` | 0 |
-| `session/error` | `core/session.py:1060` | 0 |
-| `run/finish` | `core/run.py:337` | 0 |
-| `agent/run` | `core/run.py:231` | 0 |
+| `policy/decision` | `core/guard.py::main` | 114 |
+| `run/complete` | `core/evidence.py::write_run` | 2 |
+| `session/open` | `core/session.py::launch` | 1 |
+| `session/close` | `core/session.py::launch` | 0 |
+| `session/error` | `core/session.py::launch` | 0 |
+| `run/finish` | `core/run.py::finish` | 0 |
+| `agent/run` | `core/run.py::execute_step` | 0 |
 
 Dos observaciones que el diseño tiene que resolver:
 
