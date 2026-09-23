@@ -40,10 +40,10 @@ jobs:
         # ha ejecutado nunca, ni aquí ni en local (NOT_RUN); este trabajo es lo que lo cerraría.
         python: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with: { fetch-depth: 0 }
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with: { python-version: "${{ matrix.python }}" }
 
       - name: Sin dependencias de terceros
@@ -91,8 +91,8 @@ jobs:
     name: Puertas sobre el espacio de ejemplo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with: { python-version: "3.13" }
 
       - name: Inicializar el espacio de ejemplo
@@ -117,7 +117,7 @@ jobs:
           python3 scripts/gate_summary.py refuto-run.json
           exit $rc
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
           name: evidencia
@@ -133,8 +133,8 @@ jobs:
     # REPORTA su ausencia correctamente, no que los agentes existan. Marcar «soportado» un
     # agente que no está es exactamente lo que refuto existe para impedir.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with: { python-version: "3.13" }
       - name: La sonda declara NOT_INSTALLED, no revienta ni inventa
         run: |
@@ -152,6 +152,6 @@ jobs:
           test -s probe.json || { echo "la sonda no produjo salida"; exit 1; }
           set -e
           python3 scripts/check_probe_honesty.py probe.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with: { name: sonda, path: probe.json, retention-days: 30 }
