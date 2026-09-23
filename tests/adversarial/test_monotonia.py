@@ -93,17 +93,39 @@ class TestAtaquesALaMonotonia(unittest.TestCase):
                           f"medias es indistinguible de una política.")
         return r
 
-    def test_M1_retirar_una_ruta_protegida_heredada(self):
-        """En la práctica: el proyecto vuelve a poder editar lo que lo evalúa."""
-        self._rechazado(_hijo(protected_paths=["contratos/**"]),
-                        "protected_paths", "M1 retirar puerta/ruta heredada")
+    def test_M1_retirar_una_ruta_protegida_heredada_es_INEXPRESABLE(self):
+        """En la práctica: el proyecto vuelve a poder editar lo que lo evalúa.
+
+        No se rechaza: **no se puede escribir**. El efectivo de un campo `ACUMULA` es la
+        unión, así que un hijo que lista menos no retira nada — simplemente no añade. Es más
+        fuerte que detectarlo: no se puede violar lo que no se puede decir.
+
+        La versión anterior de este ataque exigía el rechazo, y ese diseño obligaba al hijo a
+        REPETIR cada entrada del padre so pena de «retirarla» — la repetición exacta que la
+        herencia existe para eliminar. Un cliente con veinte rutas forzaba veinte copias por
+        proyecto, y a la tercera copia alguien recorta.
+        """
+        r = refinar(PADRE, _hijo(protected_paths=["contratos/**"]))
+        self.assertEqual(PASS, r.status, "un hijo que no repite al padre debe poder refinar")
+        for heredada in PADRE["protected_paths"]:
+            self.assertIn(heredada, r.politica.protected_paths,
+                          f"M1 SOBREVIVIÓ: «{heredada}» del padre desapareció del efectivo")
+        self.assertIn("contratos/**", r.politica.protected_paths)
 
     def test_M2_debilitar_una_orden_denegada_pasandola_a_consulta(self):
-        """En la práctica: `sudo` deja de estar prohibido y pasa a preguntarse — y a quien se
-        le pregunta en una sesión desatendida es a nadie."""
-        self._rechazado(_hijo(command_deny=["rm -rf:*"],
-                              command_ask=["git push:*", "sudo:*"]),
-                        "command_deny", "M2 debilitar restricción heredada")
+        """En la práctica: la orden deja de estar prohibida y pasa a preguntarse — y a quien
+        se le pregunta en una sesión desatendida es a nadie.
+
+        Tampoco es expresable: `command_deny` acumula, así que la del padre sigue ahí y
+        `decide_command` la encuentra antes de llegar a las de consulta.
+        """
+        from core.policy import decide_command
+        r = refinar(PADRE, _hijo(command_deny=[], command_ask=["git push:*", "sudo:*"]))
+        self.assertEqual(PASS, r.status)
+        self.assertIn("sudo:*", r.politica.command_deny,
+                      "M2 SOBREVIVIÓ: la orden denegada por el padre desapareció")
+        self.assertEqual("deny", decide_command(r.politica, "sudo algo").outcome,
+                         "M2 SOBREVIVIÓ: la orden del padre ya no se deniega")
 
     def test_M3_ensanchar_writable_paths(self):
         """En la práctica: el agujero que el cliente cerró se reabre en un proyecto."""
@@ -120,10 +142,17 @@ class TestAtaquesALaMonotonia(unittest.TestCase):
         self._rechazado(_hijo(block_secret_content=False),
                         "block_secret_content", "M5 degradar evidencia exigida")
 
-    def test_M6_retirar_una_ruta_de_credencial(self):
-        """En la práctica: la clave privada vuelve a ser legible."""
-        self._rechazado(_hijo(secret_read_deny=[]),
-                        "secret_read_deny", "M6 retirar requisito de identidad/credencial")
+    def test_M6_retirar_una_ruta_de_credencial_es_INEXPRESABLE(self):
+        """En la práctica: la clave privada vuelve a ser legible.
+
+        `secret_read_deny` acumula, así que vaciarlo en el hijo no retira nada del padre.
+        Como M1 y M2: la violación no se detecta porque no se puede escribir.
+        """
+        r = refinar(PADRE, _hijo(secret_read_deny=[]))
+        self.assertEqual(PASS, r.status)
+        for ruta in PADRE["secret_read_deny"]:
+            self.assertIn(ruta, r.politica.secret_read_deny,
+                          f"M6 SOBREVIVIÓ: «{ruta}» del padre desapareció del efectivo")
 
     def test_M7_padre_ausente_no_cae_a_valores_por_omision(self):
         """El más peligroso: el silencio produce un espacio que PARECE gobernado."""

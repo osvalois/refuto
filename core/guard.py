@@ -119,7 +119,19 @@ def evaluate(policy: Policy, workspace: Path, fact: dict):
     return Decision(ALLOW, reason="la carga del gancho no trae ruta ni orden que evaluar"), "none"
 
 
-def _emit_event(workspace: Path, fact: dict, decision, kind: str) -> str:
+def _digest_de(policy) -> str:
+    """El digest efectivo de la política que acaba de decidir, o cadena vacía.
+
+    `getattr` y no acceso directo: `Policy.default()` —la de fábrica, cuando el espacio no
+    trae fichero— no pasa por `load` y no lleva identidad. Reventar aquí convertiría un
+    espacio sin política en un guardián roto, que es peor que un evento sin digest.
+    """
+    ident = getattr(policy, "identidad_efectiva", None)
+    return ident.efectivo if ident else ""
+
+
+def _emit_event(workspace: Path, fact: dict, decision, kind: str,
+                digest: str = "") -> str:
     """Toda decisión del guardián deja rastro. Un control sin rastro no se puede auditar.
 
     Si no se puede escribir el evento, el guardián NO se cae —bloquear una escritura legítima
@@ -145,6 +157,12 @@ def _emit_event(workspace: Path, fact: dict, decision, kind: str) -> str:
             "reason": decision.reason,
             "euid": euid(),
             "sudo_user": os.environ.get("SUDO_USER", ""),
+            # QUÉ política decidió esto. Sin el digest, un evento dice qué regla denegó pero
+            # no de qué política efectiva salió — y con herencia esa pregunta pasa de ociosa a
+            # central: la regla pudo venir del cliente, y el cliente pudo cambiar después.
+            # Vacío significa «no se pudo determinar», no «no hay»: las dos cosas se
+            # distinguen porque la segunda no existe — toda política cargada lleva identidad.
+            "policy_digest": digest,
         })
     except Exception as exc:                                            # noqa: BLE001
         aviso = (f"AUDITORÍA INTERRUMPIDA: esta decisión no se pudo registrar en "
@@ -223,7 +241,7 @@ def main(argv: list | None = None) -> int:
         return 2
 
     decision, kind = evaluate(policy, workspace, fact)
-    aviso = _emit_event(workspace, fact, decision, kind)
+    aviso = _emit_event(workspace, fact, decision, kind, _digest_de(policy))
 
     # Si esto corre como root bajo sudo, se devuelve `.harness/` a quien invocó. Sin ello, una
     # sola sesión con sudo deja a la persona sin poder escribir su propio rastro.
@@ -304,7 +322,7 @@ def _main_antigravity(opts, raw: str) -> int:
     peor, motivos, avisos = ALLOW, [], []
     for fact in facts:
         decision, kind = evaluate(policy, workspace, fact)
-        aviso = _emit_event(workspace, fact, decision, kind)
+        aviso = _emit_event(workspace, fact, decision, kind, _digest_de(policy))
         if aviso:
             avisos.append(aviso)
         if _ORDEN_DECISION[decision.outcome] > _ORDEN_DECISION[peor]:

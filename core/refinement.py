@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -93,6 +94,16 @@ class Refinamiento:
 # `ENDURECE`  booleano: `True` del padre no se puede poner a `False`.
 # `PROPIO`    no se hereda; el valor del hijo manda. Reservado a lo que no es una restricción.
 ACUMULA, REDUCE, ENDURECE, PROPIO = "acumula", "reduce", "endurece", "propio"
+#: `MODO`   diccionario runtime→modo: el hijo no puede poner un modo MÁS PERMISIVO que el padre.
+MODO = "modo"
+
+#: Orden de permisividad, de menos a más. Sólo se comparan modos que estén aquí.
+#:
+#: Un modo que no figure NO se compara: se exige igualdad con el padre. Si no se puede
+#: demostrar que un cambio no es una relajación, no se autoriza — y eso incluye a
+#: `declared-in-agent` y `unknown`, que vienen en los valores de fábrica y no son rankeables
+#: porque su permisividad la decide otro fichero o no se sabe.
+ORDEN_MODOS = ("ask", "default", "acceptEdits", "bypassPermissions")
 
 REGLAS = {
     # Lo que protege. Más siempre se puede; menos, nunca.
@@ -113,9 +124,17 @@ REGLAS = {
     # Detectar secretos es una restricción: encenderla se puede, apagarla no.
     "block_secret_content": ENDURECE,
 
-    # El modo por runtime no es una restricción de seguridad sino de interacción; el proyecto
-    # lo decide. Se declara explícitamente para que no caiga aquí por omisión.
-    "default_modes": PROPIO,
+    # `default_modes` SÍ es una restricción de seguridad, y clasificarlo como `PROPIO` fue un
+    # error mío. El razonamiento que escribí —«no es seguridad sino interacción»— quedó
+    # falsado midiendo: `adapters/claude.py` compila este valor a `permissions.defaultMode`,
+    # así que un hijo podía pasar de `ask` a `bypassPermissions` y la monotonía no lo miraba.
+    #
+    # El matiz que la medición también dio, y que conviene no perder: NO está comprobado que
+    # `bypassPermissions` anule el gancho `PreToolUse`. Los ajustes compilados siguen
+    # emitiendo sus reglas de consulta, así que el daño real es menor que «apaga la consulta a
+    # la persona» — pero eso es comportamiento de Claude Code y aquí está `NOT_RUN`. La
+    # reclasificación procede igual: lo que no se puede afirmar no se concede.
+    "default_modes": MODO,
 
     # Metadatos. No son política y por eso el hijo los fija: `schema` identifica el contrato
     # del documento y `version` la revisión de quien lo escribe. Que estén aquí y no
@@ -161,6 +180,23 @@ def identidad_de(doc: dict, *, padre: Identidad | None = None) -> Identidad:
 
 def _viola(campo: str, regla: str, padre, hijo) -> list:
     """Qué ha intentado hacer el hijo que no puede. Lista vacía = refina bien."""
+    if regla == MODO:
+        fuera = []
+        for runtime, modo_hijo in (hijo or {}).items():
+            modo_padre = (padre or {}).get(runtime)
+            if modo_padre is None or modo_padre == modo_hijo:
+                continue
+            if modo_padre in ORDEN_MODOS and modo_hijo in ORDEN_MODOS:
+                if ORDEN_MODOS.index(modo_hijo) > ORDEN_MODOS.index(modo_padre):
+                    fuera.append(f"`{campo}[{runtime}]`: el padre pide «{modo_padre}» y el "
+                                 f"hijo pone «{modo_hijo}», que es más permisivo.")
+            else:
+                fuera.append(f"`{campo}[{runtime}]`: el padre pide «{modo_padre}» y el hijo "
+                             f"pone «{modo_hijo}». Alguno de los dos no está en el orden de "
+                             f"permisividad, así que no se puede demostrar que el cambio no "
+                             f"sea una relajación — y lo que no se puede afirmar no se "
+                             f"concede.")
+        return fuera
     if regla == ENDURECE:
         if bool(padre) and not bool(hijo):
             return [f"`{campo}`: el padre lo exige (`true`) y el hijo lo apaga (`false`). "
@@ -168,9 +204,18 @@ def _viola(campo: str, regla: str, padre, hijo) -> list:
         return []
     p, h = set(padre or ()), set(hijo or ())
     if regla == ACUMULA:
-        faltan = sorted(p - h)
-        return [f"`{campo}`: el hijo retira {len(faltan)} entrada(s) del padre: "
-                f"{', '.join(faltan[:5])}. Este campo sólo puede crecer."] if faltan else []
+        # Nunca hay violación, y es deliberado: el efectivo es la UNIÓN, así que el hijo no
+        # tiene forma de retirar nada. Relajar aquí no se detecta — es INEXPRESABLE.
+        #
+        # La primera versión exigía que el hijo repitiera cada entrada del padre so pena de
+        # «retirarla». Además de detectar mal (un hijo legítimo que añadía una ruta y no
+        # repetía las heredadas se rechazaba), obligaba a la repetición exacta que la
+        # herencia existe para eliminar: un cliente con veinte rutas protegidas forzaba a
+        # copiarlas en cada proyecto, y a la tercera copia alguien recorta.
+        #
+        # No poder expresar la violación es más fuerte que detectarla. El único campo donde
+        # sigue haciendo falta detección es `REDUCE`, porque ahí la unión SÍ ensancharía.
+        return []
     if regla == REDUCE:
         sobran = sorted(h - p)
         return [f"`{campo}`: el hijo añade {len(sobran)} entrada(s) que el padre no tiene: "
@@ -198,6 +243,33 @@ def refinar(padre_doc: dict, hijo_doc: dict, *,
         return Refinamiento(NOT_EXECUTABLE,
                             motivo=f"la política hija no se pudo interpretar: {exc}")
 
+    # Lo que el padre APLICA, no lo que ESCRIBE.
+    #
+    # Esto comparaba `padre_doc.get(campo)` — el documento crudo. Los valores de fábrica
+    # (16 órdenes denegadas, `block_secret_content: True`, las rutas protegidas de serie)
+    # sólo se materializan cuando `Policy.from_dict` rellena un campo AUSENTE, así que un
+    # padre que no los escribe aportaba el conjunto vacío a la unión.
+    #
+    # Dos consecuencias medidas el 2026-09-23, y la segunda es la grave:
+    #
+    #   V1  padre sin `command_deny` + hijo con una orden  →  efectivo 1 entrada.
+    #       `rm -rf /` y `sudo` pasaban a `allow`.
+    #   V7  padre sin `block_secret_content` (fábrica True) + hijo con `false`  →  la cadena
+    #       RESUELVE sin violación y la detección de secretos queda apagada. El invariante
+    #       que este módulo declara en su docstring, falsado por OMISIÓN del padre.
+    #
+    # El agujero de V1 no lo introduce el refinamiento —un hijo sin `extends` que declara una
+    # lista corta pierde igual las 16—: es la semántica de `from_dict`, donde declarar un
+    # campo lo SUSTITUYE. Lo que la herencia aporta es convertirlo en el camino por defecto,
+    # porque el propósito de un hijo es declarar sólo lo suyo.
+    #
+    # La asimetría es deliberada: el PADRE se resuelve (sus valores de fábrica son parte de lo
+    # que aplica), el HIJO no. Para el hijo lo que importa es qué declaró EXPLÍCITAMENTE:
+    # resolverlo también haría que un campo que calla trajera el valor de fábrica y, en
+    # `REDUCE`, la intersección con el padre lo estrecharía a nada — rompiendo la herencia
+    # legítima justo donde tiene que funcionar.
+    padre_eff = padre.to_dict()
+
     desconocidas = [k for k in hijo_doc
                     if not k.startswith("_")
                     and k not in REGLAS
@@ -209,18 +281,21 @@ def refinar(padre_doc: dict, hijo_doc: dict, *,
                    f"{', '.join(sorted(desconocidas))}. No se hereda lo que no se ha decidido "
                    f"cómo se hereda — un campo sin regla sería un agujero por omisión.")
 
-    efectivo = dict(padre_doc)
+    efectivo = dict(padre_eff)
     violaciones: list = []
     for campo, regla in REGLAS.items():
         if campo not in hijo_doc:
             continue
-        violaciones += _viola(campo, regla, padre_doc.get(campo), hijo_doc.get(campo))
+        violaciones += _viola(campo, regla, padre_eff.get(campo), hijo_doc.get(campo))
         if regla == ACUMULA:
-            efectivo[campo] = sorted(set(padre_doc.get(campo) or ()) |
+            efectivo[campo] = sorted(set(padre_eff.get(campo) or ()) |
                                      set(hijo_doc.get(campo) or ()))
         elif regla == REDUCE:
-            efectivo[campo] = sorted(set(padre_doc.get(campo) or ()) &
+            efectivo[campo] = sorted(set(padre_eff.get(campo) or ()) &
                                      set(hijo_doc.get(campo) or ()))
+        elif regla == MODO:
+            # El del padre como base: un runtime que el hijo no menciona conserva el suyo.
+            efectivo[campo] = {**(padre_eff.get(campo) or {}), **(hijo_doc[campo] or {})}
         else:
             efectivo[campo] = hijo_doc[campo]
 
@@ -242,6 +317,159 @@ def refinar(padre_doc: dict, hijo_doc: dict, *,
     return Refinamiento(PASS, politica=resultante, identidad=ident,
                         cadena=[pid, ident],
                         motivo="el hijo refina al padre: no retira nada y no abre nada nuevo")
+
+
+#: Profundidad máxima de la cadena `refuto → cliente → proyecto`. Tres niveles y un margen.
+#: El límite existe por el ciclo: un padre que se declara hijo de su hijo colgaría el
+#: guardián en cada decisión, y un guardián colgado no deniega — deja de responder, que es
+#: peor que denegar.
+MAX_CADENA = 8
+
+
+def politica_efectiva(ruta: Path, doc: dict) -> Policy:
+    """La política efectiva del fichero `ruta`, con `extends` resuelto. La usa `Policy.load`.
+
+    `extends` es una RUTA relativa al directorio del propio fichero de política, o absoluta.
+    Deliberadamente no es un nombre contra el censo: resolver por nombre exige decidir dónde
+    vive la capa de cliente, y esa decisión no está tomada. Un resolvedor que adivinara sería
+    peor que uno que exige la ruta.
+
+    Levanta `HerenciaIrresoluble` —subclase de `PoliticaIlegible`— si no se puede construir.
+    El guardián ya deniega ante `PoliticaIlegible`, así que un fallo de herencia falla cerrado
+    sin tocar una línea del guardián.
+    """
+    from core.policy import HerenciaIrresoluble
+
+    vistos: list = []
+    actual_ruta, actual_doc = ruta.resolve(), doc
+    cadena: list = []                       # de hijo a ancestro
+    while True:
+        if actual_ruta in vistos:
+            raise HerenciaIrresoluble(
+                f"la cadena de `extends` tiene un ciclo: "
+                f"{' → '.join(p.name for p in vistos + [actual_ruta])}. Una cadena circular "
+                f"no tiene política efectiva.")
+        vistos.append(actual_ruta)
+        if len(vistos) > MAX_CADENA:
+            raise HerenciaIrresoluble(
+                f"la cadena de `extends` excede {MAX_CADENA} niveles. O hay un ciclo que no "
+                f"se detectó, o la composición dejó de ser legible por una persona.")
+        cadena.append((actual_ruta, actual_doc))
+        ref = actual_doc.get("extends")
+        if not ref:
+            break
+        if not isinstance(ref, str) or not ref.strip():
+            raise HerenciaIrresoluble(
+                f"«{actual_ruta.name}» declara `extends` y no es una referencia legible: "
+                f"{ref!r}")
+        padre_ruta = Path(ref)
+        if not padre_ruta.is_absolute():
+            padre_ruta = actual_ruta.parent / padre_ruta
+        if not padre_ruta.is_file():
+            raise HerenciaIrresoluble(
+                f"«{actual_ruta.name}» declara `extends: {ref}` y ese padre no existe en "
+                f"{padre_ruta}. NO se aplican los valores por omisión ni la política del hijo "
+                f"a secas: un espacio que dice heredar y corre sin su padre parece gobernado "
+                f"sin estarlo.")
+        try:
+            padre_doc = json.loads(padre_ruta.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HerenciaIrresoluble(
+                f"el padre «{ref}» existe y no se pudo leer ({type(exc).__name__}: {exc}). "
+                f"No poder leerlo no es no tenerlo: no se puede afirmar cuál es la política.")
+        actual_ruta, actual_doc = padre_ruta.resolve(), padre_doc
+
+    # De ancestro a hijo, refinando de dos en dos. El ancestro manda sobre todos.
+    cadena.reverse()
+    _, efectivo_doc = cadena[0]
+    ident = identidad_de(efectivo_doc)
+    for ruta_hijo, hijo_doc in cadena[1:]:
+        esperado = str(hijo_doc.get("extends_digest") or "")
+        if esperado and esperado != ident.digest:
+            raise HerenciaIrresoluble(
+                f"«{ruta_hijo.name}» ancla `extends_digest` {esperado[:12]}… y su padre hoy "
+                f"es {ident.digest[:12]}…. El padre cambió: el significado de este espacio "
+                f"cambiaría sin que el espacio se haya tocado.")
+        r = refinar(efectivo_doc, hijo_doc, padre_id=ident)
+        if r.status != PASS:
+            raise HerenciaIrresoluble(
+                f"«{ruta_hijo.name}» no refina a su padre: {r.motivo} "
+                f"{' | '.join(r.violaciones)}")
+        efectivo_doc = {**efectivo_doc, **{k: v for k, v in r.politica.to_dict().items()
+                                           if k in REGLAS}}
+        ident = r.identidad
+    politica = Policy.from_dict(efectivo_doc)
+    # La identidad viaja CON la política, no en una variable de módulo.
+    #
+    # La primera versión la dejaba en `politica_efectiva.ultima_identidad`: estado mutable
+    # compartido, acción a distancia, y un resultado que dependía de quién había llamado
+    # antes. Con dos espacios resueltos en el mismo proceso —lo que hace `refuto verify`— la
+    # segunda identidad pisaba a la primera, así que un evento podía citar la política de otro
+    # espacio. Es un atributo fuera del contrato a propósito: NO es un campo de `Policy`,
+    # porque entonces necesitaría regla de monotonía y aparecería en `to_dict()`, y un valor
+    # DERIVADO que entra en el documento acaba entrando en su propio digest.
+    politica.identidad_efectiva = ident
+    return politica
+
+
+def referencia_a(padre: Path, *, desde: Path) -> str:
+    """Cómo escribir `extends` en una política que vive en el directorio `desde`.
+
+    Relativa siempre que se pueda, y no por estética: un espacio de cliente y sus proyectos se
+    mueven JUNTOS —se renombra la carpeta, se clona el árbol en otra máquina, se monta en otra
+    ruta— y una referencia relativa sobrevive a eso mientras una absoluta no sobrevive a nada
+    más. Sólo se cae a la absoluta cuando no hay ruta relativa posible (en Windows, dos
+    unidades distintas), porque ahí la alternativa no es una referencia peor: es ninguna.
+    """
+    try:
+        return Path(os.path.relpath(padre.resolve(), desde.resolve())).as_posix()
+    except ValueError:
+        return padre.resolve().as_posix()
+
+
+def documento_hijo(nombre: str, extends: str, *, version: str = "1",
+                   padre_doc: dict | None = None) -> dict:
+    """La política de una capa que HEREDA: tres claves y, si se ancla, el digest del padre.
+
+    Lo que este documento NO tiene es todo lo demás, y ése es el punto. `refuto install`
+    escribía `Policy.default().to_dict()` —la norma entera, copiada— en cada espacio nuevo. Con
+    once espacios eso son once copias que nadie vuelve a comparar, y la primera que alguien
+    recorta deja de estar gobernada sin que ningún comando lo diga. Un hijo que sólo declara lo
+    SUYO no puede divergir en lo que no declara.
+
+    `padre_doc` ancla `extends_digest`. Es opcional y no se hace por omisión: anclado, cualquier
+    cambio del padre deja de resolver hasta que alguien lo revise. Eso es lo que se quiere de
+    una capa que no debe moverse sola, y demasiado rígido para una capa de cliente que
+    evoluciona — así que lo decide quien crea la capa, no el instalador.
+    """
+    doc = {"schema": Policy.__dataclass_fields__["schema"].default,   # noqa: SLF001
+           "name": nombre, "version": version, "extends": extends}
+    if padre_doc is not None:
+        doc["extends_digest"] = digest_de(padre_doc)
+    return doc
+
+
+def explicar(ruta: Path, doc: dict) -> Refinamiento:
+    """Lo mismo que `politica_efectiva`, contado en vez de levantado.
+
+    **Llama a `politica_efectiva`**, no reimplementa nada. Es la diferencia entre una segunda
+    presentación y una segunda semántica: la primera es útil, la segunda es el defecto que
+    este módulo existe para cerrar. Una versión anterior de `refuto policy refine` resolvía el
+    padre contra el ESPACIO mientras `Policy.load` lo resolvía contra el directorio de la
+    política, y las dos daban respuestas distintas sobre el mismo fichero.
+    """
+    from core.policy import PoliticaIlegible
+    try:
+        pol = politica_efectiva(ruta, doc)
+    except PoliticaIlegible as exc:
+        return Refinamiento(NOT_EXECUTABLE, motivo=str(exc))
+    ident = getattr(pol, "identidad_efectiva", None)
+    return Refinamiento(PASS, politica=pol, identidad=ident,
+                        cadena=[ident] if ident else [],
+                        motivo=("no declara `extends`: se aplica tal cual"
+                                if not doc.get("extends")
+                                else "la cadena de `extends` resuelve y cada hijo refina a su "
+                                     "padre: no retira nada y no abre nada nuevo"))
 
 
 def resolver(workspace: Path, doc: dict, *, buscar) -> Refinamiento:

@@ -90,6 +90,24 @@ class Run:
         return p
 
 
+def _digest_politica(ruta: Path) -> str:
+    """El digest de la política EFECTIVA de `ruta`, con `extends` resuelto.
+
+    Si la cadena no resuelve devuelve `"irresoluble"` en vez de levantar: una huella no puede
+    tumbar una ejecución. Dos estados irresolubles comparan iguales, y eso no abre nada — con
+    la política sin resolver el guardián deniega todo, así que no hay ejecución que reanudar.
+    """
+    if not ruta.is_file():
+        return ""
+    try:
+        from core.policy import Policy
+        pol = Policy.load(ruta)
+    except Exception:                                           # noqa: BLE001
+        return "irresoluble"
+    ident = getattr(pol, "identidad_efectiva", None)
+    return ident.efectivo[:16] if ident else "irresoluble"
+
+
 # ── huella del entorno ───────────────────────────────────────────────────────────────
 def fingerprint(workspace: Path) -> dict:
     """Lo que tiene que seguir igual para poder reanudar sin mentir."""
@@ -110,7 +128,14 @@ def fingerprint(workspace: Path) -> dict:
         "binding": {k: v.get("commit", "") for k, v in bound.items()},
         "lock_digest": digest(lock),
         "manifest_digest": digest(manifest),
-        "policy_digest": digest(policy),
+        # El digest de la política EFECTIVA, no el del fichero del proyecto.
+        #
+        # Esto digería `policy.json` a secas. Con herencia, el cliente podía cambiar entero
+        # —retirar una ruta protegida, abrir una orden— sin que el fichero del proyecto se
+        # tocara, y `compare_fingerprint` decía que el entorno seguía igual. La reanudación
+        # afirmaba reproducibilidad sobre una política distinta, que es la clase de mentira
+        # que esta huella existe para impedir.
+        "policy_digest": _digest_politica(policy),
         "python": prov["python"],
         "harness_version": prov["harness_version"],
     }
