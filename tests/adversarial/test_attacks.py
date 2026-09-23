@@ -145,8 +145,13 @@ class TestFugaDeCredenciales(unittest.TestCase):
                 self.assertEqual(decide_write(self.p, ws.root, target, content).outcome, DENY,
                                  f"{target} pasó con un secreto dentro")
 
-            ambiguo = [("app/c.py", "PASSWORD = 'correcthorsebattery'"),
-                       ("app/e.env.sample", "api_key=Zx7QwErTy9PlMnB")]
+            # Por concatenación, igual que en `tests/fixtures/__init__.py` y por el mismo
+            # motivo: escritas de una pieza, un escáner que analiza ESTE repositorio las lee
+            # como credenciales emitidas. Medido el 2026-09-23 en CI, con gitleaks instalado:
+            # `test_attacks.py:149 — generic-api-key`, un hallazgo sobre una cadena que nunca
+            # fue una credencial. El fixture ya declaraba la regla; esta línea se quedó fuera.
+            ambiguo = [("app/c.py", "PASSWORD" + " = 'correcthorsebattery'"),
+                       ("app/e.env.sample", "api_key=" + "Zx7QwErTy9PlMnB")]
             for target, content in ambiguo:
                 d = decide_write(self.p, ws.root, target, content)
                 self.assertNotEqual(d.outcome, ALLOW, f"{target} pasó con un secreto dentro")
