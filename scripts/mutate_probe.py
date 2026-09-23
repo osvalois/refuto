@@ -12,13 +12,27 @@ La cobertura dice qué líneas se ejecutaron. No dice si alguien se habría ente
 líneas hacían lo contrario. Una suite puede recorrer el 100 % de un invariante y no sujetarlo:
 basta con que ninguna prueba afirme el caso que el invariante impide.
 
-Esta sonda **debilita el juez a propósito** y comprueba si la suite lo nota:
+Esta sonda **debilita el juez a propósito** y comprueba si la suite lo nota. Cinco resultados,
+y sólo el primero es evidencia:
 
-    MUERTA     alguna prueba falló → el invariante está sujeto
-    VIVA       todas pasaron       → hueco de cobertura semántica
+    MUERTA               la mató el TESTIGO declarado → la propiedad está sujeta
+    MUERTA_INCIDENTAL    la mató otra prueba, que no afirma nada sobre la propiedad
+    MUERTA_ESTRUCTURAL   rompió el import; las pruebas murieron en el vestíbulo
+    MUERTA_SIN_TESTIGO   murió, pero no se declaró quién debía matarla
+    VIVA                 todas pasaron → hueco de cobertura semántica
 
 Una mutación VIVA no es un fallo del producto: es un fallo de la evidencia. Significa que esa
 propiedad se sostiene hoy porque nadie la ha tocado, no porque algo lo impida.
+
+Por qué hace falta el testigo, y no basta con «algo falló»
+----------------------------------------------------------
+Medido el 2026-09-22. La primera versión contaba **6/6 MUERTAS** y parecía cobertura perfecta.
+Con el árbol en HEAD, las mutaciones de `BLOCKED` y `NOT_EXECUTABLE` las mataba
+`test_portabilidad::test_ninguna_escritura_generada_hereda_el_salto_del_sistema` — una prueba
+de SALTOS DE LÍNEA. Ninguna prueba aseveraba esas propiedades; morían de rebote.
+
+Declarar por adelantado QUÉ prueba debe matar cada mutación convierte el recuento en evidencia.
+Sin esa declaración, el número sube en la dirección cómoda y nadie se entera.
 
 Las mutaciones no son aleatorias
 --------------------------------
@@ -103,6 +117,7 @@ MUTACIONES = [
         nuevo="        if False and self.status == PASS and self.findings:",
         propiedad="un resultado con hallazgos no puede aprobar",
         camino="PASS falso: la puerta emite hallazgos y aprueba igual",
+        testigos=("test_pass_con_hallazgos_se_rechaza_al_construir",),
     ),
     Mutacion(
         id="M2",
@@ -111,6 +126,7 @@ MUTACIONES = [
         nuevo='        if False and self.status == NOT_APPLICABLE and not (self.measure or "").strip():',
         propiedad="NOT_APPLICABLE exige motivo escrito",
         camino="NOT_APPLICABLE abusado: «no aplica» sin demostrar el ámbito vacío",
+        testigos=("test_no_aplica_exige_motivo_declarado",),
     ),
     Mutacion(
         id="M3",
@@ -119,6 +135,7 @@ MUTACIONES = [
         nuevo="        if False and self.status not in STATUSES:",
         propiedad="sólo existen los estados del vocabulario",
         camino="estado inventado: «OK», «DONE», «GREEN» se cuelan sin ser ninguno de los seis",
+        testigos=("test_un_estado_invalido_se_rechaza_al_construir",),
     ),
     Mutacion(
         id="M4",
@@ -148,6 +165,7 @@ MUTACIONES = [
                "    return Decision(outcome=\"allow\", reason=\"\", rule=\"\")  # MUTACIÓN"),
         propiedad="el guardián deniega la escritura protegida",
         camino="política puenteada: toda escritura se permite, incluida la del propio juez",
+        testigos=("test_escribir_la_politica_se_deniega",),
         suites=["unit", "adversarial", "selftest"],
     ),
 
