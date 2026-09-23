@@ -10,6 +10,126 @@ histórica no las conservó, se dice.
 
 ---
 
+## 0.4.0 — *sin publicar* · la política se hereda, y la evidencia dice cuál decidió
+
+`VERSION` sigue en `0.3.0`: esto describe la rama `assurance/identidad-canonica-y-falsacion`,
+no una publicación.
+
+La capacidad nueva es una sola: **una política puede declarar `extends` y refinar a su padre**,
+en la cadena `refuto → cliente → proyecto`. Lo demás son defectos encontrados al construirla y
+al intentar falsarla — varios de ellos en los propios instrumentos de medida, que es de donde
+salieron los peores.
+
+**Añadido**
+
+- **Refinamiento monotónico de política** (`core/refinement.py`), con la invariante
+  `restricciones(hijo) ⊇ restricciones(padre)`. No es `{**padre, **hijo}`: un merge deja que el
+  hijo SUSTITUYA cualquier clave, y sustituir es relajar cuando la clave es una restricción.
+  Medido: con un merge ingenuo **los 10 ataques** de `tests/adversarial/test_monotonia.py`
+  sobreviven; con `refinar()`, los 10 se rechazan. Las reglas: `ACUMULA` (unión —
+  `protected_paths`, `secret_read_deny`, `command_deny`, `command_ask`, `network_rules`),
+  `REDUCE` (intersección — `writable_paths`, `external_write_allow`), `ENDURECE`
+  (`block_secret_content`), `MODO` (`default_modes`) y `PROPIO` (`schema`, `version`). Ningún
+  campo de `Policy` puede quedarse sin regla: **el módulo no se importa si falta alguna**.
+- **Identidad de política encadenada.** `efectivo = sha256(padre.efectivo + "|" + digest)`. Dos
+  políticas con el mismo texto y distinto padre no son la misma política. Los comentarios
+  (`_que_es`, `_medido`) se excluyen del digest: si contaran, editar una nota invalidaría la
+  identidad de todos los que heredan y nadie volvería a escribir notas.
+- **El diario cita la política que decidió.** Cada evento `policy/decision` lleva
+  `policy_digest` con la identidad **efectiva**. Con herencia, «qué regla denegó» deja de bastar:
+  la regla pudo venir del cliente, y el cliente pudo cambiar después.
+- **Alta que nace heredando**: `refuto init --extends RUTA [--anchor]` escribe un hijo de cuatro
+  claves (cinco con ancla) en vez de copiar la norma entera. `refuto policy base` emite la capa 1
+  por la salida —no la escribe: su sitio es `policies/base.json`, que la política protege, y
+  materializar la norma de la que cuelgan todos los clientes es acto de persona.
+  `refuto policy refine [--json]` muestra la política efectiva y su identidad.
+- **`schemas/policy.schema.json`**, el contrato de política publicado, con
+  `tests/contract/test_policy_schema.py` que lo contrasta contra los documentos que el programa
+  produce de verdad. Hacía falta porque `scripts/check_schemas.py` comprueba que un esquema cae
+  en el subconjunto soportado y **no valida ni una instancia**: un contrato que nadie contrasta
+  es documentación.
+- **`examples/tres-capas/`**, estructura de referencia validada ejecutando el guardián real, con
+  los dos controles que impiden cerrarla con un «deniega todo».
+- **Identidad tipada de ejecución** (`core/model.py`): `new_id(kind)` y `kind_of(id)` sustituyen
+  a cuatro acuñadores independientes de `run_<hex>`.
+- **Sonda de mutación con testigo declarado** (`scripts/mutate_probe.py`): una mutación sólo
+  cuenta como muerta si cayó **la prueba que se declaró que la vigilaba**. Estados `MUERTA`,
+  `MUERTA_INCIDENTAL`, `MUERTA_ESTRUCTURAL`, `MUERTA_SIN_TESTIGO`, `VIVA`, más dos controles de
+  calibración. Un «6/6 MUERTAS» anterior era hueco: dos morían por una prueba de fin de línea.
+- **Centinela del árbol y comprobador de citas** (`scripts/tree_sentinel.py`,
+  `scripts/check_citas.py`): 30 citas `fichero::símbolo` resuelven, y una escritura ajena al
+  árbol durante una medición se detecta en vez de contaminarla.
+
+**Corregido**
+
+- **La herencia no llegaba al guardián.** `refuto policy refine` resolvía `extends`;
+  `Policy.load()` —lo que ejecuta el guardián— llamaba a `from_dict()` y no. Medido contra el
+  guardián real: un proyecto que heredaba una orden denegada por su cliente obtenía
+  `permissionDecision: "allow"`. La etiqueta «IMPLEMENTADO» en el documento de arquitectura era
+  el defecto: cerraba el gate con documentación.
+- **`ACUMULA` exigía repetición y detectaba mal.** La primera versión obligaba al hijo a repetir
+  cada entrada del padre so pena de «retirarla» — justo la repetición que la herencia existe
+  para eliminar. Con la unión **no hay sintaxis para retirar**: no se puede violar lo que no se
+  puede decir, y eso es más fuerte que detectarlo.
+- **`default_modes` estaba clasificado `PROPIO`** («no es seguridad sino interacción»). Falsado
+  midiendo: `adapters/claude.py` lo compila a `permissions.defaultMode`, así que un hijo podía
+  pasar de `ask` a `bypassPermissions`. Reclasificado a `MODO`. **No** está comprobado que
+  `bypassPermissions` anule el gancho `PreToolUse`: eso es comportamiento de Claude Code y aquí
+  está `NOT_RUN`.
+- **`ENDURECE` se burlaba por omisión.** El padre no escribía `block_secret_content` (de fábrica
+  `true`) y el hijo lo ponía a `false`: la cadena resolvía **sin violación** y la detección de
+  secretos quedaba apagada. El refinamiento comparaba documentos crudos en vez de lo que el
+  padre **aplica**.
+- **`init --extends` resolvía la ruta relativa contra el directorio actual** y la guardaba
+  relativa al directorio del hijo. Con `--workspace` —la forma de dar de alta un espacio ajeno,
+  donde el directorio actual ni pertenece al árbol— la forma relativa fallaba siempre y sólo
+  servía la absoluta, justo la que no sobrevive a mover ni clonar el árbol. Falló cerrado, pero
+  su mensaje mandaba a materializar la capa base, que no era el problema. Medido el 2026-09-23.
+- **La huella de ejecución era ciega al padre.** `core/run.py::fingerprint` digería sólo el
+  fichero del hijo: el cliente podía cambiar entero y `compare_fingerprint` decía que el entorno
+  seguía igual. **La reanudación afirmaba reproducibilidad sobre una política distinta.**
+- **La identidad vivía en estado mutable de módulo.** Con dos espacios resueltos en el mismo
+  proceso —lo que hace `refuto verify`— la segunda pisaba a la primera, y un evento podía citar
+  la política de otro espacio.
+- **La sonda medía bytecode rancio.** Python invalida un `.pyc` por `(mtime, tamaño)`; dos
+  mutaciones del mismo tamaño en el mismo segundo servían el bytecode de la anterior, así que una
+  mutación podía atribuirse a otra. Aislado con `PYTHONPYCACHEPREFIX`. Y un `finally` no corre
+  tras un `SIGKILL`: ahora hay diario en disco con reparación al arrancar, que se disparó sobre
+  un huérfano real.
+- **El corredor ignoraba el tercer cubo.** `bad = failures + errors` omitía
+  `unexpectedSuccesses`, que `wasSuccessful()` sí consulta: el día que se arreglaba un defecto
+  marcado `@expectedFailure`, la corrida salía verde y esa prueba dejaba de comprobar nada.
+- **`G-SECURITY` atribuía al espacio los hallazgos del repositorio padre** (`gitleaks detect`
+  recorre el historial y asciende), **la captura del código de salida en CI nunca ocurría**
+  (`set -uo pipefail` no desactiva `-e`) y **el control de cadena de suministro fallaba por un
+  falso positivo suyo**.
+
+**Medido** — `python3 refuto.py selftest` → **580/580, 1 omitida** (sólo Windows), 268 s.
+2026-09-23, macOS arm64 (Darwin 25.4.0), Python 3.14.6. Eran 478 en `0.3.0`. Reparto: unit 409 ·
+contract 26 · selftest 72 · adversarial 73, contado con `ast` sobre métodos de clase —
+`grep -rc "def test_"` da 581 porque recoge uno que vive dentro de una cadena.
+`scripts/check_stdlib_only.py`, `check_schemas.py`, `check_wiring.py` y `check_citas.py`
+(30 citas) salen con `0`.
+
+**Conocido, declarado y no cerrado**
+
+- **`policy wire --repos` colapsa la tercera capa.** El guardián instalado fija `--workspace` al
+  espacio que lo aloja y `core/guard.py` no asciende, así que el `policy.json` de un repositorio
+  no se lee jamás. Correcto para dos capas; para tres falta que el guardián ascienda desde el
+  directorio real. `FAIL`, medido el 2026-09-23.
+- **No hay norma en disco.** La capa 1 vive como constantes en `core/policy.py`; mientras no
+  exista `policies/base.json`, la cima de toda cadena real es el cliente y **nadie vigila lo que
+  la cima retira**.
+- **`extends` no comprueba dónde vive el padre.** Una ruta absoluta o un enlace simbólico
+  resuelven a cualquier sitio del disco. Explotarlo exige escribir el `policy.json` del hijo, que
+  está protegido: es defensa en profundidad, no una escalada. Declarado en
+  `tests/adversarial/test_violaciones_refinamiento.py`, con una prueba que fija el comportamiento
+  actual para que cerrarlo obligue a decidirlo a conciencia.
+- Herencia de **manifiesto**, resolución del padre **por nombre** contra el censo, y segunda
+  máquina: `NOT_RUN`. Cuatro puertas devuelven `BLOCKED` para ámbito vacío y `G-SDD` devuelve
+  `BLOCKED` donde el contrato dice `NOT_EXECUTABLE`; viven en `gates/**`, protegido, así que
+  están escritos como propuesta y esperan a una persona.
+
 ## 0.3.0 — 2026-09-22 · primera versión publicable, ahora `refuto`
 
 Esta versión **no añade capacidad**: la separa de la máquina y del historial en que nació.

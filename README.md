@@ -90,6 +90,21 @@ traduce a su vocabulario **y declara qué parte no puede aplicar**. El guardián
 (`realpath`) antes de compararla, así que un enlace simbólico no la sortea. Qué runtimes lo tienen
 enganchado de verdad, abajo.
 
+**La política se hereda hacia abajo y sólo se puede apretar.** Un espacio declara `extends` y
+refina a su padre en la cadena `refuto → cliente → proyecto`: un hijo **añade y endurece, nunca
+retira ni ensancha**. No es un merge — un merge deja que el hijo sustituya cualquier clave, y
+sustituir es relajar cuando la clave es una restricción. En las listas de restricción el efectivo
+es la unión, así que **no hay sintaxis para retirar una regla heredada**: no poder expresar la
+violación es más fuerte que detectarla. La identidad va encadenada (el digest del hijo incluye el
+del padre), de modo que un cliente que afloja cambia la identidad de todos sus proyectos aunque
+ninguno se haya tocado, y cada evento del diario dice bajo qué política efectiva se decidió. Si la
+cadena no resuelve —padre ausente, ilegible, en ciclo, o anclado a un digest que ya no coincide—
+el guardián **deniega**: un espacio que dice heredar y corre sin su padre parece gobernado sin
+estarlo. Estructura de referencia en [`examples/tres-capas/`](examples/tres-capas/), validada
+ejecutando el guardián real. Un límite medido y no cerrado: con `policy wire --repos` el guardián
+no asciende, así que la tercera capa no se lee — ver
+[`docs/architecture/HERENCIA-REFUTO-CLIENTE-PROYECTO.md`](docs/architecture/HERENCIA-REFUTO-CLIENTE-PROYECTO.md).
+
 **El lock ancla por commit, y se verifica antes de escribirse.** Nunca
 `traer → reescribir el lock → comparar`, que es una tautología. Una etiqueta de git es mutable.
 
@@ -134,8 +149,8 @@ probado por la suite automática · `E4` observado en ejecución, fechado.
 
 | Afirmación | Nivel | Evidencia |
 |---|---|---|
-| La suite pasa entera | **E3** | `python3 refuto.py selftest` → **478/478, 1 omitida** (sólo Windows). 2026-09-22, macOS arm64 (Darwin 25.4.0), Python 3.14.6 y 3.12 |
-| Reparto de la suite | **E2** | `grep -rc "def test_" tests/<suite>`: unit 366 · contract 19 · selftest 66 · adversarial 27 = 478. 2026-09-22 |
+| La suite pasa entera | **E3** | `python3 refuto.py selftest` → **580/580, 1 omitida** (sólo Windows), 268 s. 2026-09-23, macOS arm64 (Darwin 25.4.0), Python 3.14.6 |
+| Reparto de la suite | **E2** | unit 409 · contract 26 · selftest 72 · adversarial 73 = **580**, contado con `ast` sobre métodos de clase. `grep -rc "def test_"` da 581: uno de ellos vive dentro de una cadena. 2026-09-23 |
 | 13 puertas · 22 roles · 13 fases · 5 adapters | **E2** | `gates/base.py::GATES`, `roles/registry.json`, `core.lifecycle.PHASES`, `adapters/registry.py`. 2026-09-22 |
 | Sin dependencias de terceros | **E2** | `python3 scripts/check_stdlib_only.py` en local, 2026-09-22 |
 | `Result` no se construye `PASS` con hallazgos | **E3** | `tests/contract/test_result_contract.py` |
@@ -177,7 +192,9 @@ prompt por patrones — limita lo que el agente puede hacer si la obedece.
 | [`SUPPORT_MATRIX.md`](SUPPORT_MATRIX.md) | salida de ejemplo de `refuto docs`, fechada |
 | [`docs/lifecycle/`](docs/lifecycle/) | las 13 fases, con entrada, salida y revisión humana |
 | [`docs/agents/`](docs/agents/) | los 22 roles, sus contratos y cómo se elige el runtime |
-| [`docs/decisions/`](docs/decisions/) | 8 ADRs, cada uno con qué lo haría cambiar |
+| [`docs/decisions/`](docs/decisions/) | 12 ADRs, cada uno con qué lo haría cambiar |
+| [`docs/architecture/HERENCIA-REFUTO-CLIENTE-PROYECTO.md`](docs/architecture/HERENCIA-REFUTO-CLIENTE-PROYECTO.md) | la cadena `refuto → cliente → proyecto`, sus reglas de monotonía y lo que aún no resuelve |
+| [`examples/tres-capas/`](examples/tres-capas/) | la misma cadena en tres directorios, validada con el guardián real |
 | [`docs/research/`](docs/research/) | investigación primaria, con fechas y versiones |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | cómo extenderlo sin romperlo |
 
