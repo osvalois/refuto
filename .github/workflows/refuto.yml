@@ -57,15 +57,35 @@ jobs:
       - name: Esquemas dentro del subconjunto soportado
         run: python3 scripts/check_schemas.py
 
+      - name: Aseguramiento de diagramas de arquitectura
+        run: |
+          python3 scripts/generate_architecture_diagrams.py
+          python3 scripts/check_diagram_assurance.py
+
+      - name: Sonda de mutación del juez
+        run: python3 scripts/mutate_probe.py
+
       - name: Todo componente conectado, no sólo escrito
         # Un módulo que existe y que nadie invoca es peor que no tenerlo: aparece en el
         # inventario, se cita en las revisiones, y no hace nada.
         run: python3 scripts/check_wiring.py
 
+      - name: Huella del árbol antes de la suite
+        # Se mide para poder afirmar después que la suite no tocó el árbol. Sin la huella de
+        # antes, «no cambió nada» es una suposición.
+        run: python3 scripts/tree_sentinel.py snapshot --out /tmp/arbol-antes.json
+
       - name: Suite completa
         # `--verbose` es opción del parser RAÍZ: va ANTES del subcomando. Escrito al revés,
         # argparse sale con 2 y este trabajo falla siempre sin llegar a ejecutar una prueba.
         run: python3 refuto.py --verbose selftest
+
+      - name: La suite no deja residuo en el árbol
+        # Una prueba que escribe en el repositorio contamina a la siguiente y, si muta algo
+        # del juez, deja un juez debilitado corriendo sin que nadie lo sepa. Ocurrió el
+        # 2026-09-22: una sonda de mutación murió por señal y dejó `core/evidence.py` mutado,
+        # con `finally` saltado. Desde entonces esto se comprueba en vez de suponerse.
+        run: python3 scripts/tree_sentinel.py verify --against /tmp/arbol-antes.json
 
   espacio:
     name: Puertas sobre el espacio de ejemplo

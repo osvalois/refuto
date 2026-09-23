@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import uuid
@@ -232,8 +233,69 @@ def _git(*args: str, cwd: Path | None = None) -> str:
         return ""
 
 
+# ── identidad de ejecución ───────────────────────────────────────────────────────────
+#
+# Cuatro entidades con ciclos de vida distintos, y hasta el 2026-09-22 las cuatro se
+# identificaban con el mismo formato `run_<hex16>` salido de la misma función:
+#
+#     core/run.py:168        ejecución orquestada  →  .harness/state/<id>.json
+#     core/session.py:879    sesión interactiva    →  eventos `session/*` del diario
+#     core/runcontext.py     contexto construido   →  .harness/context/
+#     refuto.py:888          verificación          →  .harness/evidence/<id>.json
+#
+# De seis enlaces posibles entre ellas existía **uno** (`Run.context_run_id`). El síntoma
+# visible: `refuto status` decía «no hay ninguna ejecución registrada» justo después de un
+# `verify` que había impreso la ruta de su evidencia. Ninguno de los dos mentía — leían
+# familias distintas con el mismo nombre.
+#
+# Fusionarlas en un solo id sería peor: una sesión contiene N verificaciones, una
+# verificación puede ocurrir sin sesión (CI), y un contexto se reconstruye sin ejecución.
+# Forzar una identidad única obligaría a inventar una ejecución sintética cada vez que
+# faltara, y una entidad inventada para cuadrar el modelo es el dato falso que este sistema
+# persigue. Ver ADR-0012.
+#
+# El tipo va en el identificador, no en el directorio: el directorio es una propiedad del
+# almacenamiento, no de la entidad, y un id suelto en un diario tiene que poder decir qué es.
+KIND_SESSION = "ses"
+KIND_ORCHESTRATION = "orq"
+KIND_VERIFICATION = "ver"
+KIND_CONTEXT = "ctx"
+#: Lo que se emitía antes. Se sigue LEYENDO para siempre; no se emite más. Un diario
+#: histórico tiene que seguir siendo legible por el código que lo lee.
+KIND_LEGACY = "run"
+
+KINDS = (KIND_SESSION, KIND_ORCHESTRATION, KIND_VERIFICATION, KIND_CONTEXT)
+_ID = re.compile(r"^(ses|orq|ver|ctx|run)_([0-9a-f]{16})$")
+
+
+def new_id(kind: str) -> str:
+    """Un identificador tipado. `kind` debe ser uno de `KINDS`.
+
+    `KIND_LEGACY` se rechaza a propósito: se lee, no se escribe. Permitir emitirlo dejaría
+    la puerta abierta a seguir acuñando identidades sin tipo, que es el defecto que esto cierra.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"tipo de identidad desconocido {kind!r}; hay {KINDS}. "
+                         f"`{KIND_LEGACY}` sólo se lee, no se emite.")
+    return f"{kind}_{uuid.uuid4().hex[:16]}"
+
+
+def kind_of(identifier: str) -> str:
+    """El tipo que declara ese identificador, o cadena vacía si no reconoce la forma.
+
+    Vacío significa «no lo reconozco», y NO se debe leer como «es legado»: un id con forma
+    ajena puede venir de otro programa que reclame el mismo directorio. Confundir las dos
+    cosas es cómo un documento de otro contrato acaba tratado como propio.
+    """
+    m = _ID.match(identifier or "")
+    return m.group(1) if m else ""
+
+
 def new_run_id() -> str:
-    return f"run_{uuid.uuid4().hex[:16]}"
+    """LEGADO. Emite el formato sin tipo. Conservado sólo para no romper a un llamador
+    externo que aún lo importe; dentro de refuto no lo usa nadie desde el 2026-09-22.
+    Use `new_id(KIND_*)`."""
+    return f"{KIND_LEGACY}_{uuid.uuid4().hex[:16]}"
 
 
 def now() -> str:

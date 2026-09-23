@@ -24,7 +24,8 @@ from pathlib import Path
 from core.digest import excerpt, sha256_text
 from core.evidence import append_event, verdict_of
 from core.model import (
-    BLOCKED, FAIL, NOT_EXECUTABLE, PASS, new_run_id, now, provenance, write_json,
+    BLOCKED, FAIL, KIND_ORCHESTRATION, NOT_EXECUTABLE, PASS, new_id, now, provenance,
+    write_json,
 )
 from core.proc import TEXT_IO, spawn_kwargs
 
@@ -165,7 +166,7 @@ def plan(workspace: Path, *, goal: str = "", phases: list | None = None,
     policy_file = workspace / ".harness" / "policy.json"
     policy = Policy.load(policy_file) if policy_file.is_file() else Policy.default()
 
-    run = Run(run_id=new_run_id(), workspace=str(workspace), goal=goal,
+    run = Run(run_id=new_id(KIND_ORCHESTRATION), workspace=str(workspace), goal=goal,
               started_at=now(), fingerprint=fingerprint(workspace))
     steps = []
     for phase in plan_for(phases):
@@ -350,10 +351,19 @@ def load(workspace: Path, run_id: str) -> Run | None:
         return None
 
 
+#: Se leen los DOS prefijos, y así queda indefinidamente. `orq_` es lo que se emite desde el
+#: 2026-09-22; `run_` es lo que hay escrito en los espacios instalados antes. Retirar el legado
+#: dejaría de encontrar ejecuciones que existen, y «no hay ninguna» es exactamente la respuesta
+#: falsa que la identidad tipada vino a corregir. Ver ADR-0012.
+_PATRONES_ORQUESTACION = ("orq_*.json", "run_*.json")
+
+
 def latest(workspace: Path) -> Run | None:
     d = workspace / STATE_DIR
-    runs = sorted(d.glob("run_*.json"), key=lambda p: p.stat().st_mtime, reverse=True) \
-        if d.is_dir() else []
+    if not d.is_dir():
+        return None
+    runs = [p for patron in _PATRONES_ORQUESTACION for p in d.glob(patron)]
+    runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return load(workspace, runs[0].stem) if runs else None
 
 

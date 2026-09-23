@@ -9,6 +9,7 @@ prueba, es una demostración.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -44,15 +45,39 @@ PEM_SINTETICA = ("-----BEGIN RSA PRI" + "VATE KEY-----\n"
 
 
 class Workspace:
-    """Espacio de trabajo desechable. Se usa con `with`."""
+    """Espacio de trabajo desechable. Se usa con `with`.
+
+    Dentro del `with`, `$HOME` apunta a un directorio vacío —hermano de la raíz, nunca dentro
+    de ella, para no añadir un árbol que las puertas verían al recorrer el espacio— y al salir
+    vuelve a ser el de antes.
+
+    No es una comodidad: es lo que hace cierta la frase de arriba. El código que se prueba lee
+    el home real —`core/mcp.py` busca ahí servidores MCP, `core/discovery.py` agentes
+    instalados— y sin aislarlo la suite mide el árbol de quien la ejecuta. Falsado el
+    2026-09-22 con un `$HOME` en el que `~/.claude/settings.json` es ilegible: **7 de 480
+    pruebas** pasan de verde a roja sin tocar una línea del producto. En la máquina donde se
+    escribieron pasaban, y por eso nadie lo vio; en la de al lado, no.
+
+    El home es de sólo lectura por convención pero no por permisos: si el código escribe ahí,
+    escribe en el temporal y se va con él, que es justo lo que se quiere.
+    """
 
     def __init__(self, name: str = "ws"):
         self.root = Path(tempfile.mkdtemp(prefix=f"harness-{name}-"))
+        self.home = Path(tempfile.mkdtemp(prefix=f"harness-{name}-home-"))
+        self._home_previo: str | None = None
 
     def __enter__(self) -> "Workspace":
+        self._home_previo = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
         return self
 
     def __exit__(self, *exc) -> None:
+        if self._home_previo is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._home_previo
+        shutil.rmtree(self.home, ignore_errors=True)
         shutil.rmtree(self.root, ignore_errors=True)
 
     # ── construcción ─────────────────────────────────────────────────────────────────

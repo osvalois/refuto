@@ -59,6 +59,22 @@ class TestResultContract(unittest.TestCase):
         mixto = [Result("G-C", "c", PASS), not_applicable("G-A", "a", "sin sujeto")]
         self.assertTrue(verdict_of(mixto).startswith("INTEGRABLE"))
 
+    def test_una_corrida_con_bloqueo_no_es_integrable(self):
+        """BLOCKED nunca permite integrar: lo que no se pudo comprobar no puede pasar por aprobado."""
+        from core.evidence import verdict_of
+        b = [Result("G-C", "c", PASS), blocked("G-A", "a", "falta algo")]
+        v = verdict_of(b)
+        self.assertIn("NO INTEGRABLE TODAVÍA", v)
+        self.assertFalse(v.startswith("INTEGRABLE"))
+
+    def test_una_corrida_con_error_de_ejecucion_no_es_integrable(self):
+        """NOT_EXECUTABLE nunca permite integrar: si falló la propia puerta, la corrida no es válida."""
+        from core.evidence import verdict_of
+        ne = [Result("G-C", "c", PASS), not_executable("G-A", "a", "explotó", RuntimeError("boom"))]
+        v = verdict_of(ne)
+        self.assertIn("NO INTEGRABLE — hay verificaciones que no se pudieron ejecutar", v)
+        self.assertFalse(v.startswith("INTEGRABLE"))
+
     def test_una_puerta_que_revienta_no_aprueba(self):
         r = not_executable("G", "puerta", "explotó", RuntimeError("boom"))
         self.assertEqual(r.status, NOT_EXECUTABLE)

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.evidence import append_event
-from core.model import new_run_id, now
+from core.model import KIND_SESSION, new_id, now
 from core.proc import TEXT_IO, interpreter
 
 
@@ -165,7 +165,26 @@ def ensure_gitignore(harness_dir: Path) -> bool:
     return True
 
 
-def sesiones_vivas(workspace: Path) -> list:
+class Sesiones(list):
+    """Las otras sesiones vivas, y —si no se pudo mirar— por qué no se pudo.
+
+    Es una `list` para no romper a quien ya la recorre, pero lleva `ciego`: el motivo por el
+    que la tabla de procesos no se pudo leer. Una lista vacía con `ciego` puesto significa «no
+    lo sé», no «no hay nadie», y son cosas distintas: la primera no autoriza a concluir.
+
+    Existe por el fallo que arregla. `sesiones_vivas` devolvía `[]` tanto cuando no había otra
+    sesión como cuando `ps` no se podía ejecutar, y quien llamaba sólo avisaba si la lista
+    traía algo. En un entorno donde inspeccionar procesos está restringido, la sesión abría
+    declarando silenciosamente que estaba sola —que es justo la afirmación que este arnés
+    existe para no dejar hacer sin medirla—.
+    """
+
+    def __init__(self, items=(), ciego: str = ""):
+        super().__init__(items)
+        self.ciego = ciego
+
+
+def sesiones_vivas(workspace: Path) -> Sesiones:
     """Otras sesiones gobernadas abiertas AHORA sobre este mismo espacio: [(pid, orden)].
 
     Se mide en la tabla de procesos, no en el diario: una sesión que murió sin cerrar deja un
@@ -175,6 +194,9 @@ def sesiones_vivas(workspace: Path) -> list:
     Por qué importa: dos sesiones sobre el mismo árbol se pisan sin saberlo. Medido en un
     espacio real: una cerró un plan a las 21:01 y a las 21:04 la otra añadió ficheros que lo
     dejaron sin validez; nadie lo vio hasta rehacer la medición.
+
+    Si `ps` no se puede ejecutar, el resultado viene vacío **y con `ciego` puesto**. Vacío y
+    ciego no es «está sola»: es «no se pudo comprobar», y quien llama tiene que decirlo.
     """
     # Anclada por delante: la ruta empieza un argumento (tras espacio o `=`). Como subcadena
     # suelta, `/b/x/pub/.harness/state/` contenía a `/x/pub/.harness/state/`.
@@ -182,8 +204,10 @@ def sesiones_vivas(workspace: Path) -> list:
     try:
         out = subprocess.run(["ps", "-Ao", "pid=,ppid=,command="], capture_output=True,
                              timeout=5, **TEXT_IO).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Sesiones(ciego=f"no se pudo leer la tabla de procesos ({type(exc).__name__}: "
+                              f"{exc}). Sin ella no se puede afirmar que esta sesión esté sola "
+                              f"sobre el espacio.")
     tabla = {}
     for linea in out.splitlines():
         partes = linea.split(None, 2)
@@ -199,7 +223,7 @@ def sesiones_vivas(workspace: Path) -> list:
     for pid, (_, orden) in sorted(tabla.items()):
         if pid not in propias and "--append-system-prompt-file" in orden and marca.search(orden):
             vivas.append((pid, orden))
-    return vivas
+    return Sesiones(vivas)
 
 
 def _spec_dir(doc: Path) -> Path:
@@ -852,7 +876,7 @@ def plan(workspace: Path, *, runtime: str = "claude", role_id: str = "", spec: s
     """Prepara la sesión sin abrirla. `argv` es exactamente lo que se ejecutaría."""
     from adapters.registry import ADAPTERS
 
-    sp = SessionPlan(workspace=workspace, runtime=runtime, run_id=new_run_id())
+    sp = SessionPlan(workspace=workspace, runtime=runtime, run_id=new_id(KIND_SESSION))
     spec_obj = ADAPTERS.get(runtime)
     if spec_obj is None:
         sp.blockers.append(f"no hay adapter para «{runtime}»; hay: {', '.join(sorted(ADAPTERS))}")
@@ -904,6 +928,13 @@ def plan(workspace: Path, *, runtime: str = "claude", role_id: str = "", spec: s
             f"hay {len(vivas)} sesión(es) gobernada(s) abierta(s) sobre este mismo espacio "
             f"(pid {', '.join(str(p) for p, _ in vivas)}). Comparten árbol: lo que una mida, "
             f"la otra puede invalidarlo sin aviso. Ciérrela(s) o re-mida antes de concluir.")
+    elif vivas.ciego:
+        # Vacío por no haber mirado NO es vacío. Callar aquí es abrir la sesión afirmando
+        # que está sola, que es precisamente la afirmación que no se ha medido.
+        sp.warnings.append(
+            f"no se pudo comprobar si hay otras sesiones gobernadas sobre este espacio: "
+            f"{vivas.ciego} Trabaje como si pudiera haberlas: verifique a mano antes de "
+            f"concluir nada que dependa de tener el árbol en exclusiva.")
 
     # A dónde va a hablar. Una sesión puede abrir bien, con todo puesto, y morir en el primer
     # mensaje porque una variable del shell la enruta a otro proveedor. Todo lo demás parece
