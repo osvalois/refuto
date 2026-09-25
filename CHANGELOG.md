@@ -10,6 +10,161 @@ histórica no las conservó, se dice.
 
 ---
 
+## 0.4.1 — *sin publicar* · seis defectos que una revisión adversarial encontró en los controles
+
+Todo lo de abajo salió de auditar la rama `assurance/protocolo-tres-caras` el **2026-09-25**
+contra `69bcd6a`, con la suite en verde (748/748) y CI en verde sobre el commit exacto. Ninguno
+lo detectó una prueba: los seis estaban **en los controles**, que es donde un defecto no tiene
+quien lo mire.
+
+El patrón se repite y conviene nombrarlo: un mecanismo se escribe bien, y **lo que decide si
+funciona no se comprueba a sí mismo**. Una tabla que se consulta por orden y admite duplicados;
+una atestación que enumera extensiones; una cadena de huellas que asume que nadie escribe a la
+vez; un tier estático que afirma para siempre algo medido una vez.
+
+**Arreglado**
+
+- **`Ê` afirmaba «sé que no escribe» de tres intérpretes** (`core/effects.py`). `perl` estaba en
+  `_ESCRITORES` **y** en `_OPACOS`, y la primera se consulta antes; con clase `en_sitio` y sin
+  su bandera, `perl`, `awk` y `sed` salían como LECTURA con `opaco=False`. Como `core/grants.py`
+  descarta una concesión `read-only` cuando la orden es opaca, el defecto **invertía su
+  criterio**. Medido con la concesión del propio caso de uso del módulo (`sudo *`, `read-only`):
+
+  ```
+  sudo systemctl status nginx                        deny    ← lectura de diagnóstico
+  sudo journalctl / dmesg / netstat / ss / strings   deny
+  sudo perl -e 'unlink "gates/base.py"'              ALLOW   ← borra el juez, como root
+  sudo awk 'BEGIN{print "" > "/etc/sudoers.d/x"}'    ALLOW
+  ```
+
+  Seis de ocho diagnósticos denegados y las tres escrituras como root permitidas. Ahora hay
+  clase `en_sitio_opaco`: sin su bandera **no se derivó nada**, luego `opaco`. `ruff` y `gofmt`
+  siguen en `en_sitio` porque formatean lo que se les nombra y no ejecutan programa del usuario.
+  Y las tres tablas se comprueban **disjuntas al importar**: la causa raíz era el duplicado, no
+  el caso. `tests/adversarial/test_efectos_interpretes.py` (6) — **7 fallos sin el arreglo**.
+- **La cadena del diario se rompía con el uso normal** (`core/evidence.py`). `append_event` leía
+  la cabeza y escribía sin serializar; el argumento de que `O_APPEND` bastaba es correcto sobre
+  los BYTES y no dice nada de la CADENA. Con 12 guardianes concurrentes: **12 eventos escritos,
+  cadena rota en la línea 3**, y el motivo emitido acusaba de manipulación — «falta, sobra o se
+  movió algún evento» — lo que era concurrencia normal. Una alarma de integridad que salta con
+  el uso normal se aprende a ignorar. Ahora leer la cabeza y escribir el eslabón van dentro del
+  mismo `flock`, y `MECANISMO_DE_BLOQUEO` lo declara para poder afirmarlo. Medido después: 16
+  procesos → 16 eventos, cadena íntegra. De paso, `cabeza()` leía el fichero **entero** en cada
+  evento (O(n) en el camino caliente del guardián, sin techo); ahora lee desde el final.
+  `tests/adversarial/test_ledger_concurrente.py` (5).
+- **La atestación `I6'` no cubría lo que decide** (`core/trust.py`). `inventario_motor` recorría
+  sólo `rglob("*.py")`: **73 ficheros, cero de datos**. `roles/registry.json` alimenta
+  `capacidades_de()` y produce `DENY` en el guardián desde `da39715` — editarlo cambiaba
+  veredictos sin que `deriva_del_motor()` lo notara. La huella se quedó atrás **en el mismo
+  commit** que volvió relevante al registro. Ahora cubre `roles/`, `schemas/` y `policies/`
+  (78 ficheros, 5 de datos), y la documentación sigue sin moverla.
+  `tests/adversarial/test_huella_del_motor.py` (4).
+- **Un fallo de auditoría no retenía nada en `claude`** (`core/guard.py`). Con el diario
+  inescribible y una escritura que aprobaría: `claude` → `allow`, kiro/gemini/opencode →
+  exit 2, `antigravity` → `ask`. Tres respuestas al mismo hecho, y la permisiva era la del
+  runtime principal. `_emit_event` argumenta exactamente ese caso —«una aprobación sin registrar
+  quedaba idéntica a una registrada»— y el arreglo estaba en `_main_antigravity` y no en
+  `main()`. Ahora los dos dialectos estructurados responden `ask`: el trabajo no se pierde y lo
+  decide quien puede arreglar el diario. `tests/adversarial/test_auditoria_interrumpida.py` (4).
+- **Una concesión `read-only` concedía sin verificar** (`core/grants.py`). Con `efectos=None` la
+  comprobación se saltaba entera, contra el principio que el propio módulo defiende: «no poder
+  demostrar que no escribe no es haber demostrado que no escribe». Hoy `decide_command` siempre
+  los pasa, así que el camino real estaba cubierto; una firma que concede por omisión sólo
+  espera a que alguien la llame de otra forma. Dos pruebas existentes fijaban ese `fail-open` al
+  omitir el dato; **se corrigieron las pruebas, no el criterio**.
+- **`verify` indicaba una bandera que no acepta** (`core/report.py`). La puerta imprimía
+  `… y N más (use --verbose)` y `refuto verify --verbose` sale con **64**: `--verbose` es global
+  y va antes del subcomando. Ahora se imprime la orden entera.
+
+**Añadido**
+
+- **`scripts/check_mediciones.py`**, y CI lo ejecuta. Las cifras ESTRUCTURALES del README ya
+  tenían vigilante (`check_wiring`, `check_citas`) y cuadraban las siete; las de CORRIDA no, y
+  son las que se citan como `E3`/`E4`. Medido: la tabla declaraba **685 pruebas y 13 controles
+  con fecha del propio día**, cuando eran 748 y 14 — el commit que las puso al día (`bf9f061`)
+  fue seguido de cinco que añadieron 730 líneas de pruebas sin tocarla. No comprueba tiempos:
+  dependen de la máquina, y un control que falla por motivos que no son el defecto se desactiva.
+- **La deuda de `verify` se declara puerta a puerta** (`DEUDA_DECLARADA` en
+  `scripts/preflight.py`). `verify` estaba en `INFORMA` con el motivo «deuda declarada del
+  proyecto, no de este cambio»; el motivo era cierto —`git blame`: los 18 hallazgos de
+  `G-SECURITY` vienen de `e28249c`, en `main`— y **nada lo comprobaba**. Un tier estático afirma
+  para siempre algo medido una vez. Ahora `verify` es `BLOQUEA` y perdona sólo las ocho puertas
+  con deuda escrita: una puerta nueva en rojo retiene el empujón. Verificado en los dos
+  sentidos. Hoy ningún control usa `INFORMA`, y el módulo lo dice en vez de dejar un tier que
+  parece en uso.
+- **El control `datos-personales` cubre la norma que cita.** Comprobaba `/Users/…` y tres
+  dominios de correo personal, y se reportaba con ese nombre; `AGENTS.md` prohíbe además correos
+  corporativos, hosts internos y direcciones privadas. Un alcance declarado mayor que el medido
+  es un `PASS` que afirma de más. Ampliado a correo de cualquier dominio (salvo los de ejemplo y
+  los `noreply` de agentes), RFC 1918 y enlace-local, y sufijos internos. `.local` se dejó
+  **fuera**, medido: con él, **47 coincidencias y cero hosts** — `settings.local.json` (44),
+  `hooks.local.json` (2), `.env.local` (1). Sobre el árbol rastreado el resultado sigue siendo
+  cero ficheros: ampliar no costó ninguna excepción.
+
+**Propuesto, no aplicado** — `gates/**` está protegido por la propia política, así que lo aplica
+una persona:
+
+- **`G-SECURITY` aprueba con la herramienta caída**, y su `measure` afirma haberla usado.
+  Ejecutado sobre un espacio limpio con `trivy` sin poder bajar su base: `status: PASS`,
+  `measure: … herramientas: gitleaks, syft, trivy`, `obs: SBOM generado: 0 componentes`. Tres
+  defectos: el umbral sólo distingue ausente de presente y no cubre *caída*; un SBOM de cero
+  componentes aprueba contra «un ámbito vacío nunca aprueba»; y `measure` se construye con
+  `shutil.which()` —por estar instalada, no por haber funcionado—, así que **la evidencia
+  escrita afirma una cobertura que no hubo**. Que es olvido y no criterio lo demuestra el propio
+  fichero: `syft` sí pone `blocked = True` al fallar, y las otras dos no. Parche verificado con
+  `git apply --check` y ejecutado sobre una copia (`PASS` → `BLOCKED`):
+  [`docs/remediation/g-security-aprueba-con-la-herramienta-caida.md`](docs/remediation/g-security-aprueba-con-la-herramienta-caida.md).
+
+**Cerrado después, y es la otra mitad de la retractación.** Los tres arreglos de arriba que
+tocan `scripts/preflight.py`, `core/report.py` y `scripts/check_mediciones.py` se entregaron
+**verificados a mano y sin una sola prueba**. Es decir: el trabajo consistió en señalar
+controles que nadie vigilaba y se entregó añadiendo controles que nadie vigilaba. Un guion de
+verificación ejercitado sólo en el caso bueno no ha demostrado lo único que importa de él —que
+**sabe decir que no**—, que es el mismo criterio que `scripts/mutate_probe.py` se aplica a sí
+mismo con sus controles negativos `NC1`/`NC2`.
+
+- **`tests/unit/test_preflight_criterio.py`** (15) fija los bordes que una corrida real no
+  produce cuando uno quiere: puerta nueva en rojo, ámbito vacío, `NOT_APPLICABLE`, deuda ya
+  saldada, y que toda entrada de `DEUDA_DECLARADA` traiga motivo y nombre una puerta que
+  existe. Para poder probarlo sin pagar 40 s de puertas, el criterio se separó en
+  `clasificar_puertas()`. Dos pruebas nuevas cazaron defectos reales durante su propia
+  escritura: que `check_mediciones.py` no estaba rastreado por git —un control que no se publica
+  no protege a quien clona— y que el fichero de casos disparaba el detector que prueba (resuelto
+  partiendo los literales, como ya hace `tests/fixtures/__init__.py`, en vez de gastar la
+  primera entrada de `_PERSONALES_PERMITIDOS`).
+- **`tests/unit/test_next_ejecutable.py`** (5) comprueba que la orden que imprime una puerta la
+  acepta el parser REAL de refuto, no que el texto sea uno concreto. `core.envelope.Siguiente`
+  ya exigía esto del campo `do` —«una orden ejecutable, no una descripción»— y el texto que lee
+  una persona no estaba cubierto por nada.
+- **`tests/unit/test_check_mediciones.py`** (8), con el control negativo que faltaba: que el
+  guion detecte una cifra falsa, y que una afirmación DESAPARECIDA no se dé por buena — el modo
+  de fallo silencioso, donde «no hay problema» sería indistinguible de «ya no se comprueba
+  nada».
+
+**Y el hallazgo que quedaba en `E1` se midió, y era real** (`core/mcp_server.py`). El
+`workspace` lo aporta el modelo y `refuto_verify` escribe. Medido sobre un directorio recién
+creado, fuera de todo espacio gobernado:
+
+```
+.harness/evidence/ledger.jsonl · sbom.json · ver_edb734a4c5f14c66.json
+```
+
+No es destrucción ni exfiltración: es escritura **no solicitada fuera del espacio**, y la
+doctrina del producto sobre eso ya estaba escrita en `external_write_allow` —fuera del espacio
+sólo se escribe en raíces declaradas—. Esta superficie la rodeaba por no preguntarse cuál es el
+espacio: el módulo declaraba «no escribe lo que gobierna» y decía *qué* no escribe, no *dónde*.
+Ahora `_argv_de` exige que el destino sea la raíz desde la que se lanzó el servidor o un espacio
+que ya tenga `.harness/`. Es el criterio más estrecho que no cierra ningún uso real —verificar
+un directorio que nunca fue un espacio deja casi todas las puertas en `BLOCKED` y no informa de
+nada— y se comprueba en `_argv_de`, por donde pasan las siete herramientas, para que no dependa
+de que nadie añada mañana otra que escriba. `tests/adversarial/test_mcp_workspace.py` (8).
+
+**Medido tras los cambios** — `804/804` pruebas (1 omitida, sólo Windows) y
+`preflight PASS · 15 controles`, 2026-09-25, macOS arm64 (Darwin 25.4.0), Python 3.14.6. **No ha
+pasado por CI**: la última corrida verde es sobre `69bcd6a`, anterior a todo esto.
+
+---
+
 ## 0.4.0 — *sin publicar* · la política se hereda, y la evidencia dice cuál decidió
 
 `VERSION` sigue en `0.3.0`: esto describe la rama `assurance/identidad-canonica-y-falsacion`,
