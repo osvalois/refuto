@@ -160,8 +160,20 @@ nada— y se comprueba en `_argv_de`, por donde pasan las siete herramientas, pa
 de que nadie añada mañana otra que escriba. `tests/adversarial/test_mcp_workspace.py` (8).
 
 **Medido tras los cambios** — `804/804` pruebas (1 omitida, sólo Windows) y
-`preflight PASS · 15 controles`, 2026-09-25, macOS arm64 (Darwin 25.4.0), Python 3.14.6. **No ha
-pasado por CI**: la última corrida verde es sobre `69bcd6a`, anterior a todo esto.
+`preflight PASS · 15 controles`, 2026-09-25, macOS arm64 (Darwin 25.4.0), Python 3.14.6.
+
+Y ya no es `single-host`: corrida [36186362072](https://github.com/osvalois/refuto/actions/runs/36186362072)
+sobre `cc7278a`, `ubuntu-latest`, matriz 3.10 y 3.13, **5 trabajos en verde** —incluido el
+preflight completo y las puertas sobre el espacio de ejemplo—. Los siete commits van en el
+PR [#6](https://github.com/osvalois/refuto/pull/6).
+
+**Lo que sigue sin estar, y no lo cierra un agente.** `G-PR` continúa en `FAIL`: ninguno de los
+45 commits cita un requisito, y **no se inventó ninguno**. El repositorio no tiene documento de
+requisitos —`G-TRACE` está `BLOCKED` exactamente por eso—, así que escribir `REQ-001` en un
+subject habría hecho pasar la puerta citando algo inexistente. Eso es mover la puerta, no
+pasarla, y es el fraude que este programa existe para impedir. Cerrarlo de verdad pide un
+documento de requisitos, que es otro trabajo. `G-HUMAN` sigue en `BLOCKED` por las cinco
+revisiones sin registrar, que es lo que el PR viene a pedir.
 
 ---
 
