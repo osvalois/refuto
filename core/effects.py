@@ -53,7 +53,31 @@ READ, WRITE = "READ", "WRITE"
 #:
 #: `destino`  la ÚLTIMA ruta no-opción es el destino escrito  (cp, mv, install, ln)
 #: `todas`    toda ruta no-opción se escribe                  (touch, mkdir, rm, chmod, …)
-#: `en_sitio` toda ruta no-opción se escribe SÓLO si aparece la bandera indicada
+#: `en_sitio` toda ruta no-opción se escribe SÓLO si aparece la bandera indicada; SIN ella el
+#:            programa lee, y eso se puede afirmar porque su efecto está acotado por diseño
+#: `en_sitio_opaco`  igual con la bandera, y SIN ella **no se deriva nada**: es un intérprete
+#:            de propósito general y puede escribir por otros caminos que sus argumentos no
+#:            declaran
+#:
+#: La distinción entre las dos últimas es el arreglo de un defecto medido el 2026-09-25, y la
+#: forma del defecto importa más que el caso: `perl` estaba en esta tabla Y en `_OPACOS`, y como
+#: esta tabla se consulta primero, ganaba la que afirma de más. Sin su `-i`, la rama `else`
+#: clasificaba la orden como LECTURA y devolvía `opaco=False`:
+#:
+#:     perl -e 'open(F,">","gates/base.py")'      →  escrituras=[]  opaco=False
+#:     awk 'BEGIN{print "x" > "gates/base.py"}'   →  escrituras=[]  opaco=False
+#:     sed 's/a/b/w gates/base.py' README.md      →  escrituras=[]  opaco=False
+#:     python3 -c 'open("gates/base.py","w")'     →  escrituras=[]  opaco=True   ← el correcto
+#:
+#: Es decir, `Ê` afirmaba «sé que no escribe» de tres lenguajes Turing-completos — exactamente
+#: lo que el encabezado de este módulo promete no hacer, porque `Ê` sólo vale si lo que afirma
+#: es sólido. Y la consecuencia no se quedaba aquí: `core/grants.py` descarta una concesión
+#: `read-only` cuando la orden es opaca, así que el defecto **invertía** su criterio —
+#: `sudo systemctl status` se denegaba (no modelado → opaco) y `sudo perl -e 'unlink …'` se
+#: permitía (concesión aplicada).
+#:
+#: `gofmt` y `ruff` se quedan en `en_sitio` a propósito: formatean el fichero que se les nombra
+#: y no ejecutan programa del usuario. La diferencia entre las dos clases es esa y no otra.
 _ESCRITORES = {
     "cp": ("destino", None), "mv": ("destino", None), "install": ("destino", None),
     "ln": ("destino", None), "rsync": ("destino", None),
@@ -61,7 +85,8 @@ _ESCRITORES = {
     "rm": ("todas", None), "truncate": ("todas", None), "shred": ("todas", None),
     "chmod": ("todas", None), "chown": ("todas", None), "chflags": ("todas", None),
     "tee": ("todas", None),
-    "sed": ("en_sitio", "-i"), "perl": ("en_sitio", "-i"), "awk": ("en_sitio", "-i"),
+    "sed": ("en_sitio_opaco", "-i"), "perl": ("en_sitio_opaco", "-i"),
+    "awk": ("en_sitio_opaco", "-i"),
     "gofmt": ("en_sitio", "-w"), "ruff": ("en_sitio", "--fix"),
 }
 
@@ -84,8 +109,13 @@ _LECTORES = {
 }
 
 #: Intérpretes y ejecutores: lo que hagan no se deriva de sus argumentos.
+#:
+#: `perl` NO está aquí, y su ausencia es deliberada: vive en `_ESCRITORES` como
+#: `en_sitio_opaco`, que ya produce `opaco=True` sin `-i` y además deriva las escrituras
+#: cuando la trae. Estar en las dos tablas es lo que causó el defecto que documenta
+#: `_ESCRITORES`, así que la coherencia se comprueba al importar (ver `_EN_LAS_DOS`).
 _OPACOS = {
-    "python", "python2", "python3", "node", "deno", "bun", "ruby", "perl", "php",
+    "python", "python2", "python3", "node", "deno", "bun", "ruby", "php",
     "sh", "bash", "zsh", "dash", "ksh", "fish", "make", "cmake", "ninja",
     "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "uvx", "cargo", "go",
     "mvn", "gradle", "ant", "dotnet", "java", "swift", "rustc", "gcc", "clang",
@@ -105,6 +135,24 @@ _ENVOLTORIOS = {"env", "nohup", "time", "nice", "ionice", "command", "builtin",
 #: Los que reciben sus operandos por la entrada estándar. Lo que escriban no se deriva de
 #: sus argumentos: se deriva de lo que les llegue por la tubería, que este módulo no ve.
 _DESDE_STDIN = {"xargs", "parallel"}
+
+#: Comprobado al importar: ningún programa puede estar en dos tablas a la vez.
+#:
+#: No es una precaución teórica. `perl` estaba en `_ESCRITORES` y en `_OPACOS`, y como
+#: `_de_un_segmento` consulta la primera antes que la segunda, ganaba la que afirma de más —
+#: `Ê` declaraba `opaco=False` sobre un intérprete. Una tabla que se consulta por orden y
+#: admite duplicados no tiene un orden: tiene una preferencia que nadie escribió.
+#:
+#: Revienta al importar, y no en producción devolviendo una clasificación que nadie decidió.
+#: Misma idea que `core.capabilities._EN_LAS_DOS` y `core.envelope._SIN_CODIGO`.
+_EN_LAS_DOS = sorted((set(_ESCRITORES) & set(_LECTORES))
+                     | (set(_ESCRITORES) & set(_OPACOS))
+                     | (set(_LECTORES) & set(_OPACOS)))
+if _EN_LAS_DOS:                                                       # pragma: no cover
+    raise RuntimeError(
+        f"programas en dos tablas de efectos a la vez: {', '.join(_EN_LAS_DOS)}. Las tablas se "
+        f"consultan por orden, así que el duplicado no es redundante: decide en silencio cuál "
+        f"gana. Clasifique cada programa en una sola.")
 
 _ASIGNACION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 #: Sustitución de proceso y expansión: marcan opacidad.
@@ -278,11 +326,18 @@ def _de_un_segmento(segmento: str) -> Efectos:
             ef.escrituras.add(rutas[0])
         elif clase == "todas":
             ef.escrituras.update(rutas)
-        elif clase == "en_sitio":
+        elif clase in ("en_sitio", "en_sitio_opaco"):
             if any(t == bandera or t.startswith(bandera) for t in resto):
                 # `sed -i` puede llevar sufijo de respaldo como argumento suelto; se marcan
                 # todas las rutas como escritas, que es el lado conservador.
                 ef.escrituras.update(rutas)
+            elif clase == "en_sitio_opaco":
+                # Sin su bandera no se derivó NADA, y de un intérprete de propósito general eso
+                # no autoriza a decir «lee». Se declara la ignorancia, que es lo único sólido.
+                ef.opaco = True
+                ef.motivo_opaco = (f"«{programa}» sin «{bandera}» ejecuta un programa que no se "
+                                   f"deriva de sus argumentos: puede escribir por otros caminos "
+                                   f"(`{programa} -e`, redirección interna, el comando `w`)")
             else:
                 ef.lecturas.update(rutas)
         return ef

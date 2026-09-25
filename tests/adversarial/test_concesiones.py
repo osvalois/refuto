@@ -29,6 +29,7 @@ import platform
 import unittest
 from pathlib import Path
 
+from core.effects import efectos
 from core.grants import (APROBACION_POR_OMISION, EFECTOS_POR_OMISION, Concesion, buscar,
                          problemas_declarados)
 from core.policy import ALLOW, ASK, DENY, Policy, decide_command
@@ -269,21 +270,41 @@ class TestLaExcepcionDeLaRaizEsUnaYSePuedeContar(unittest.TestCase):
 
 
 class TestBuscarNoDependeDelEntorno(unittest.TestCase):
-    """`buscar` se prueba directo, sin variables de entorno, para que el fallo sea localizable."""
+    """`buscar` se prueba directo, sin variables de entorno, para que el fallo sea localizable.
+
+    Se le pasan los EFECTOS, como hace `decide_command`. Estas dos pruebas los omitían y
+    concedían igual, porque la comprobación de `read-only` se saltaba cuando `efectos is None`:
+    afirmaban sobre la inyección de host/rol/fecha y de paso fijaban un `fail-open` que este
+    módulo argumenta no tener. Omitir el dato no es un caso a preservar — es la forma de llamada
+    que había que cerrar.
+    """
 
     def test_el_host_y_el_rol_se_pueden_inyectar(self):
         p = _politica()
-        self.assertIsNotNone(buscar(p, ORDEN, rol=ROL, host=ESTE_HOST).concesion)
-        self.assertIsNone(buscar(p, ORDEN, rol="otro", host=ESTE_HOST).concesion)
-        self.assertIsNone(buscar(p, ORDEN, rol=ROL, host="otro").concesion)
+        ef = efectos(ORDEN)
+        self.assertIsNotNone(buscar(p, ORDEN, rol=ROL, host=ESTE_HOST, efectos=ef).concesion)
+        self.assertIsNone(buscar(p, ORDEN, rol="otro", host=ESTE_HOST, efectos=ef).concesion)
+        self.assertIsNone(buscar(p, ORDEN, rol=ROL, host="otro", efectos=ef).concesion)
 
     def test_la_fecha_se_puede_inyectar(self):
         from datetime import date
         p = _politica(expires="2026-06-01")
-        self.assertIsNotNone(buscar(p, ORDEN, rol=ROL, host=ESTE_HOST,
+        ef = efectos(ORDEN)
+        self.assertIsNotNone(buscar(p, ORDEN, rol=ROL, host=ESTE_HOST, efectos=ef,
                                     hoy=date(2026, 5, 31)).concesion)
-        self.assertIsNone(buscar(p, ORDEN, rol=ROL, host=ESTE_HOST,
+        self.assertIsNone(buscar(p, ORDEN, rol=ROL, host=ESTE_HOST, efectos=ef,
                                  hoy=date(2026, 6, 2)).concesion)
+
+    def test_sin_efectos_una_concesion_read_only_no_concede(self):
+        """La asimetría, dicha entera: no traer `Ê` es no poder verificar, luego no conceder.
+
+        Es el mismo criterio que el caso opaco. Antes, `efectos=None` saltaba la comprobación
+        completa y `read-only` volvía a ser una promesa de quien escribe la concesión.
+        """
+        v = buscar(_politica(), ORDEN, rol=ROL, host=ESTE_HOST, efectos=None)
+        self.assertIsNone(v.concesion)
+        self.assertTrue(any("no trae los efectos" in d for d in v.descartes),
+                        f"el descarte tiene que explicarse, y dice: {v.descartes}")
 
 
 if __name__ == "__main__":

@@ -190,7 +190,18 @@ def buscar(policy, orden: str, *, rol: str = "", host: str = "", efectos=None,
             v.descartes.append(f"«{c.id}» describe esta orden y es para {list(c.hosts)}; "
                                f"esta máquina es «{anfitrion}»")
             continue
-        if c.effects == "read-only" and efectos is not None:
+        if c.effects == "read-only":
+            # Sin `Ê` no hay nada que verificar, y entonces la concesión NO aplica. Es la misma
+            # asimetría que el caso opaco de abajo, y omitirla convertía el argumento de este
+            # módulo en falso desde la propia API: con `efectos=None` la comprobación se saltaba
+            # entera y `read-only` volvía a ser una promesa de quien la escribe. Hoy quien llama
+            # (`decide_command`) siempre los pasa; una firma que concede por omisión sólo espera
+            # a que alguien la llame de otra forma.
+            if efectos is None:
+                v.descartes.append(
+                    f"«{c.id}» se declara `read-only` y esta consulta no trae los efectos de la "
+                    f"orden: no hay nada contra lo que verificarlo, así que no concede")
+                continue
             if efectos.escrituras:
                 v.descartes.append(
                     f"«{c.id}» se declara `read-only` y la orden escribe en "
