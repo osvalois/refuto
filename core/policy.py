@@ -183,6 +183,17 @@ class Policy:
     #: Reglas de red. Hoy vacío: ninguno de los cinco runtimes ofrece allowlist de dominios
     #: verificada, y declarar una regla que no se aplica es peor que no tenerla.
     network_rules: tuple = ()
+    #: Excepciones NOMBRADAS en el canal de órdenes: qué rol puede elevar privilegio, para qué
+    #: forma de orden, en qué host, con qué efectos verificados y hasta cuándo.
+    #:
+    #: Es el análogo de `writable_paths` en el canal de órdenes, y se construye igual a propósito:
+    #: se evalúa ANTES de `command_deny` —una excepción evaluada después nunca ganaría— y su
+    #: monotonía es `REDUCE`, porque abre un agujero y por tanto el hijo sólo puede cerrarlo.
+    #:
+    #: Lo que impide que sea un agujero: vive en `.harness/policy.json`, que esta misma política
+    #: protege, así que **un agente no puede concederse privilegio a sí mismo**. Ver
+    #: `core/grants.py`, que explica las cinco propiedades y lo que no demuestra.
+    privilege_grants: tuple = ()
     #: Restricciones EXTRA por rol, sobre las que ya declara `roles/registry.json`.
     #:
     #: El registro es la fuente canónica —un rol es lo que su contrato dice que es— y esto sólo
@@ -972,9 +983,35 @@ def decide_command(policy: Policy, command: str, workspace: Path | None = None) 
     for cmd in segmentos:
         for pattern in policy.command_deny:
             if _matches_command(cmd, pattern):
+                # La excepción NOMBRADA va antes del rechazo, igual que `writable_paths` va antes
+                # de `protected_paths`: evaluada después nunca podría ganarle. Ver `core/grants.py`.
+                #
+                # Se consulta AQUÍ y no arriba a propósito: una concesión no autoriza órdenes en
+                # general, autoriza órdenes que de otro modo se rechazarían. Preguntar antes de
+                # saber que hay rechazo convertiría la tabla en una lista de permisos, que es otra
+                # cosa y más ancha.
+                from core.grants import buscar
+                v = buscar(policy, cmd, rol=os.environ.get("HARNESS_ROLE", ""), efectos=ef)
+                if v.concesion is not None:
+                    if v.concesion.human_approval == "once-per-grant":
+                        return Decision(ALLOW, rule=f"concesion:{v.concesion.id}",
+                                        reason=f"«{pattern}» se rechaza por omisión y esta orden "
+                                               f"está {v.motivo}. La concesión vive en la política, "
+                                               f"que el agente no puede escribir: por eso vale "
+                                               f"como aprobación.", **marca)
+                    return Decision(ASK, rule=f"concesion:{v.concesion.id}",
+                                    reason=f"«{pattern}» se rechaza por omisión y esta orden está "
+                                           f"{v.motivo}, con aprobación por instancia: lo decide "
+                                           f"una persona cada vez.", **marca)
+                extra = ""
+                if v.descartes:
+                    # El diagnóstico que faltaba. «No hay concesión» y «la hay y caducó ayer» se
+                    # arreglan distinto, y sin esto el agente no puede distinguirlos ni pedirlo.
+                    extra = (" Hay concesión(es) que describen esta orden y no aplican: "
+                             + " · ".join(v.descartes[:3]))
                 return Decision(DENY, rule=pattern,
                                 reason=f"la orden coincide con la regla de rechazo «{pattern}»"
-                                       f" (en «{cmd[:60]}»).", **marca)
+                                       f" (en «{cmd[:60]}»).{extra}", **marca)
         if peor_ask is None:
             for pattern in policy.command_ask:
                 if _matches_command(cmd, pattern):

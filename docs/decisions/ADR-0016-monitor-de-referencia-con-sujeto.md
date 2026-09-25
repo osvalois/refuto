@@ -4,7 +4,7 @@
 decision: el guardián decide sobre (sujeto, objeto, operación); las capacidades por rol sólo
           aprietan y toda restricción declarada se aplica o se declara no observable con motivo
 date: 2026-09-25
-status: IMPLEMENTADA en las capas 1 y 2 · capas 3 y 4 PROPUESTAS, sin código
+status: IMPLEMENTADA en las capas 1, 2 y 3 · capa 4 PROPUESTA, sin código
 refina: ADR-0006 (política única compilada), ADR-0011 (fronteras de confianza),
         ADR-0013 (raíz de confianza y modelo de efectos), ADR-0014 (monotonía por cobertura)
 question: >
@@ -108,19 +108,49 @@ relajación**. Lo destructivo ya está en `command_deny` con veredicto `deny` pa
 y «requiere aprobación» es más débil que «rechazado». Una capacidad que aflojara rompería la
 monotonía que esta decisión declara.
 
-### Capa 3 · Elevación parametrizada *(propuesta, sin código)*
+### Capa 3 · Elevación parametrizada *(implementada)*
 
 Sustituir `sudo:*` en la lista plana por concesiones **nombradas, acotadas y con evidencia**:
 `id`, `roles`, `hosts`, `commands`, `effects`, `human_approval`, `expires`, `evidence`. La
 persona aprueba una **clase** de operación una vez, con caducidad y ticket, en vez de teclear
 cada orden.
 
-Monotonía: **`REDUCE`**. Una concesión abre un agujero, luego el hijo sólo puede quitar
-concesiones del padre, comprobado por cobertura como `_cubre` de ADR-0014.
+Monotonía: **`REDUCE_LISTA`**. Una concesión abre un agujero, luego el hijo sólo puede retirar
+concesiones enteras del padre. La comparación es por **contenido canónico**, no por cobertura
+como `_cubre`: comparar «anchura» entre dos concesiones exigiría decidir inclusión entre globs de
+órdenes, que es justo lo que ADR-0014 evita hacer. Estrechar una concesión heredada —acortar su
+caducidad, quitarle un host— se expresa retirándola y escribiendo otra, y escribir otra es
+añadir, que es violación. Es más estricto de lo necesario y es el lado correcto.
 
 Propiedad clave: `effects: read-only` es **verificable contra `Ê`**. Si la orden concreta deriva
-alguna escritura, la concesión no aplica. Eso convierte «confía en que es de lectura» en
-«demuéstralo».
+alguna escritura, la concesión no aplica — y **una orden opaca tampoco cuenta como de sólo
+lectura**: no poder demostrar que no escribe no es haber demostrado que no escribe. Eso convierte
+«confía en que es de lectura» en «demuéstralo».
+
+Lo que impide que sea un agujero, y no es un campo que alguien deba comprobar: la concesión vive
+en `.harness/policy.json`, que esta misma política protege, así que **un agente no puede
+concederse privilegio a sí mismo**. `human_approval` es una propiedad del sitio donde la
+concesión está escrita, no una casilla.
+
+**Una trampa en la que caí construyéndola, y que conviene no repetir.** Con `REDUCE_LISTA` y la
+raíz del motor vacía, ningún espacio podía declarar ninguna concesión **nunca**:
+
+    HerenciaIrresoluble: `privilege_grants`: el hijo declara 1 registro(s) que el padre no tiene
+
+Es exactamente la trampa que ADR-0014 documenta para `writable_paths`, y la escribí igual. La
+salida no es clasificar el campo como `PROPIO` —eso dejaría a un proyecto aflojar lo que su
+cliente apretó, que es el defecto de verdad— sino reconocer que **la raíz del motor no es un
+cliente**: es la norma base del producto y no puede enumerar las necesidades operativas de
+espacios que no conoce. `core.trust.RAIZ_NO_ACOTA` declara esa excepción, con su motivo, y una
+prueba la fija en **exactamente un campo** para que no crezca en silencio. La monotonía entre
+capas reales —cliente → proyecto— queda intacta.
+
+Y la mitad que no es código: el informe de sesión anuncia las concesiones **vigentes para ese rol
+en esa máquina**. Sin eso el mecanismo existe y nadie lo usa — un agente que no sabe que tiene
+una concesión se comporta como si no la tuviera, y el camino declarado se queda sin usar mientras
+el atajo opaco sigue ahí. No se listan las caducadas ni las de otro host: prometer autoridad que
+no hay es el peor sitio donde hacerlo, porque lo que el informe dice se toma por cierto el resto
+de la sesión.
 
 ### Capa 4 · Credenciales: mediar, no esconder *(propuesta, sin código)*
 

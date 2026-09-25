@@ -137,12 +137,48 @@ def digest_raiz() -> str:
     return digest_de(documento_raiz())
 
 
+#: Campos que la RAÍZ DEL MOTOR no acota, y por qué. Uno solo, y tiene que costar añadir otro.
+#:
+#: `privilege_grants` es la lista de autorizaciones operativas de un espacio: qué rol puede elevar
+#: privilegio, para qué forma de orden, en qué host. Su monotonía es `REDUCE_LISTA` —el hijo sólo
+#: retira— y eso es correcto entre capas REALES: un proyecto no puede concederse lo que su cliente
+#: no le dio. Pero la raíz del motor **no es un cliente**: es la norma base del producto, y no
+#: puede enumerar las necesidades operativas de espacios que no conoce.
+#:
+#: Sin esta excepción el campo sería código muerto, y se midió así el 2026-09-25: con la raíz
+#: vacía, un espacio que declaraba UNA concesión obtenía
+#:
+#:     HerenciaIrresoluble: `privilege_grants`: el hijo declara 1 registro(s) que el padre no
+#:                          tiene idénticos
+#:
+#: es decir, **ningún espacio podía declarar ninguna concesión nunca**. Es exactamente la trampa
+#: que ADR-0014 documenta para `writable_paths`, y reconocerla aquí es la razón de que esto exista
+#: en vez de haber clasificado el campo como `PROPIO` —que habría dejado a un proyecto aflojar lo
+#: que su cliente apretó, que es el defecto de verdad—.
+#:
+#: Lo que NO se pierde: la autorización sigue siendo un acto de persona, porque
+#: `.harness/policy.json` está protegido y un agente no puede escribirlo. Lo que se pierde es que
+#: la raíz pueda vetar una concesión, y la raíz nunca supo qué vetar.
+RAIZ_NO_ACOTA = {
+    "privilege_grants": "es una autorización operativa del espacio, y la raíz del motor no es un "
+                        "cliente: no puede enumerar las necesidades de espacios que no conoce. La "
+                        "monotonía `REDUCE_LISTA` sigue rigiendo entre capas reales.",
+}
+
+
 def componer_con_raiz(doc: dict):
     """`Refinar(R, doc)`. Devuelve el `Refinamiento`, que el llamador debe comprobar.
 
     Se llama con el documento de la CIMA de la cadena —el ancestro sin `extends`—, porque
     es el único punto donde antes no había nadie por encima.
+
+    Los campos de `RAIZ_NO_ACOTA` se comparan contra el propio valor del documento, no contra el
+    de la raíz: así la raíz no los veta y la monotonía entre capas reales queda intacta.
     """
     from core.refinement import refinar
 
-    return refinar(documento_raiz(), doc)
+    raiz = documento_raiz()
+    for campo in RAIZ_NO_ACOTA:
+        if campo in doc:
+            raiz[campo] = doc[campo]
+    return refinar(raiz, doc)

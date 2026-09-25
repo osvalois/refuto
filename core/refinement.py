@@ -96,6 +96,17 @@ class Refinamiento:
 ACUMULA, REDUCE, ENDURECE, PROPIO = "acumula", "reduce", "endurece", "propio"
 #: `MODO`   diccionario runtime→modo: el hijo no puede poner un modo MÁS PERMISIVO que el padre.
 MODO = "modo"
+#: `REDUCE_LISTA`  lista de registros: el hijo sólo puede QUITAR registros enteros.
+#:
+#: Hacía falta para `privilege_grants`, cuyos elementos son mapas y no cadenas, así que la
+#: comparación de conjuntos de `REDUCE` no sirve. La regla es deliberadamente gruesa: el hijo
+#: puede retirar una concesión completa y **no puede modificar una que conserva**. Estrechar
+#: una concesión existente —acortar su caducidad, quitarle un host— se expresa retirándola y
+#: escribiendo otra, y escribir otra es añadir, que es violación. Es más estricto de lo
+#: necesario y es el lado correcto: comparar «anchura» entre dos concesiones exigiría decidir
+#: inclusión entre globs de órdenes, que es justo lo que `_cubre` evita hacer (ADR-0014).
+REDUCE_LISTA = "reduce_lista"
+
 #: `ACUMULA_MAPA`  diccionario clave→conjunto: `ACUMULA` aplicado clave a clave.
 #:
 #: Hacía falta para `role_capabilities`, que es un mapa de rol a restricciones. La unión por
@@ -149,6 +160,10 @@ REGLAS = {
     # correcta: una lista de concesiones tendría que ser `REDUCE` y volvería a la trampa que
     # documenta ADR-0014. Ver `core/capabilities.py`.
     "role_capabilities": ACUMULA_MAPA,
+
+    # Una concesión de privilegio ABRE un agujero en el canal de órdenes, igual que
+    # `writable_paths` lo abre en las rutas. Por eso reduce: el hijo cierra, nunca abre.
+    "privilege_grants": REDUCE_LISTA,
 
     # Metadatos. No son política y por eso el hijo los fija: `schema` identifica el contrato
     # del documento y `version` la revisión de quien lo escribe. Que estén aquí y no
@@ -233,7 +248,23 @@ def _viola(campo: str, regla: str, padre, hijo) -> list:
             return [f"`{campo}`: el padre lo exige (`true`) y el hijo lo apaga (`false`). "
                     f"Apagar una comprobación heredada es relajar."]
         return []
-    p, h = set(padre or ()), set(hijo or ())
+    # `REDUCE_LISTA` va ANTES de convertir a conjunto: sus elementos son mapas y un `dict` no es
+    # hashable. Ponerlo después reventaba con `TypeError` en vez de decidir, que en una función de
+    # monotonía es lo peor que puede pasar — un error de tipo se lee como «la política no se pudo
+    # resolver» y el guardián deniega todo, así que un campo mal colocado parece un ataque.
+    if regla == REDUCE_LISTA:
+        def _canon(x):
+            return json.dumps(x, ensure_ascii=False, sort_keys=True) if isinstance(x, dict) \
+                else json.dumps(x, ensure_ascii=False)
+        p_can = {_canon(x) for x in (padre or ())}
+        sobran = sorted(_canon(x) for x in (hijo or ()) if _canon(x) not in p_can)
+        if sobran:
+            return [f"`{campo}`: el hijo declara {len(sobran)} registro(s) que el padre no "
+                    f"tiene idénticos. Este campo ABRE un agujero, así que el hijo sólo puede "
+                    f"retirar registros enteros; modificar uno se expresa retirándolo y "
+                    f"escribiendo otro, y escribir otro es añadir. Primero: "
+                    f"{sobran[0][:160]}"]
+        return []
     if regla == ACUMULA_MAPA:
         # Como `ACUMULA` y por el mismo motivo: el efectivo es la unión por clave, así que
         # retirar una restricción de un rol no es una violación detectable — es inexpresable.
@@ -249,6 +280,8 @@ def _viola(campo: str, regla: str, padre, hijo) -> list:
                 return [f"`{campo}[{rol}]`: se esperaba una lista de restricciones y llegó un "
                         f"{type(v).__name__}."]
         return []
+    # Desde aquí los campos son conjuntos de cadenas y sí se pueden hashear.
+    p, h = set(padre or ()), set(hijo or ())
     if regla == ACUMULA:
         # Nunca hay violación, y es deliberado: el efectivo es la UNIÓN, así que el hijo no
         # tiene forma de retirar nada. Relajar aquí no se detecta — es INEXPRESABLE.
@@ -369,7 +402,11 @@ def refinar(padre_doc: dict, hijo_doc: dict, *,
         if campo not in hijo_doc:
             continue
         violaciones += _viola(campo, regla, padre_eff.get(campo), hijo_doc.get(campo))
-        if regla == ACUMULA_MAPA:
+        if regla == REDUCE_LISTA:
+            # La lista del HIJO, por el mismo motivo que en `REDUCE`: ya se demostró arriba que
+            # cada registro suyo está idéntico en el padre, luego su lista ES el estrechamiento.
+            efectivo[campo] = list(hijo_doc.get(campo) or ())
+        elif regla == ACUMULA_MAPA:
             fusion = {k: list(v) for k, v in (padre_eff.get(campo) or {}).items()}
             for rol, v in (hijo_doc.get(campo) or {}).items():
                 fusion[rol] = sorted(set(fusion.get(rol, ())) | set(v or ()))

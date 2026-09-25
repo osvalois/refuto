@@ -92,6 +92,62 @@ salieron los peores.
   `scripts/gate_summary.py` y `scripts/check_probe_honesty.py`, que es lo que lee
   `.github/workflows/refuto.yml`.
 
+**Añadido — el monitor de referencia gana un sujeto, y el privilegio se parametriza** (2026-09-25)
+
+El control de acceso es una relación ternaria `(sujeto, objeto, operación)` y refuto decidía
+sobre una binaria: el hecho normalizado tenía siete campos y ninguno era el sujeto. Consecuencia
+matemática, no de implementación: **todo agente en todo rol tenía autoridad idéntica**.
+
+- **El canal de lectura, que estaba sin mirar.** `secret_read_deny` se aplicaba en
+  `decide_write` (escrituras) y en `adapters/claude.py` (capa del agente, sobre `Read`). El
+  guardián engancha `Bash`, así que `cat .env` salía `allow` y `cp .env ~/.claude/…/memory/` —que
+  **sobrevive a la sesión**— también. Y el dato ya estaba: `Efectos.lecturas` se poblaba y
+  `decide_command` tenía tres referencias a `escrituras` y **cero** a `lecturas`. Ahora leer una
+  credencial es `ask` —un `deny` duro se rodea con `python3 -c`, que es opaco, y entonces el canal
+  deja de mirarse— y la **combinación** lectura-de-credencial + escritura-fuera-del-espacio es
+  `deny`: no tiene lectura legítima, y que el destino esté en `external_write_allow` no lo cambia.
+- **El sujeto** (`core/capabilities.py`). 22 roles declaraban 10 restricciones cuyos únicos
+  consumidores las imprimían en el informe bajo «No puedes:». **Diez capacidades por veintidós
+  roles, aplicadas por cero líneas de código.** Y peor, en la propia puerta: `G-ROLES` declara en
+  su umbral «restricciones **aplicables**» y las contrastaba contra `KNOWN_CONSTRAINTS`, que es el
+  diccionario de **prosa** del informe — «no sabe aplicar» significaba «no tengo una frase en
+  español para describirla». Ahora se valida contra `capabilities.CONOCIDAS` = aplicadas ∪
+  declaradas no observables **con motivo**; la tercera categoría ya no se puede expresar. Reparto:
+  5 aplicadas, 5 no observables. Una de ellas, `destructive_requires_approval`, es no observable
+  **porque sería una relajación**.
+- **Elevación parametrizada** (`core/grants.py`). `command_deny` colapsaba cuatro dimensiones
+  —privilegio, destrucción, alcance externo, integridad de suministro— en una lista plana con dos
+  verdictos, así que `sudo cat /etc/shadow` y `sudo systemctl status` eran la misma regla. Una
+  concesión declara `roles × hosts × commands × effects × expires × evidence`, se evalúa **antes**
+  de `command_deny` —como `writable_paths` va antes de `protected_paths`— y `effects: read-only`
+  se **verifica contra `Ê`**: si la orden escribe, o si es **opaca**, la concesión no aplica. Lo
+  que impide que sea un agujero no es un campo que alguien deba comprobar: la concesión vive en
+  `.harness/policy.json`, que la política protege, así que un agente no puede concederse
+  privilegio a sí mismo.
+- **El informe de sesión anuncia las concesiones vigentes** para ese rol en esa máquina. Sin eso
+  el mecanismo existe y nadie lo usa: un agente que no sabe que tiene una concesión se comporta
+  como si no la tuviera, y el camino declarado se queda sin usar mientras el atajo opaco sigue
+  ahí. No se listan las caducadas ni las de otro host — prometer autoridad que no hay es lo peor
+  que puede hacer un informe que se toma por cierto el resto de la sesión.
+- **Dos reglas de monotonía nuevas**, porque `core/refinement.py` no se importa hasta que un campo
+  declara la suya: `ACUMULA_MAPA` (unión clave a clave, para las capacidades — en negativo
+  precisamente para que la unión sea la operación correcta) y `REDUCE_LISTA` (el hijo sólo retira
+  registros enteros, por contenido canónico: comparar «anchura» entre concesiones exigiría decidir
+  inclusión entre globs, que es lo que ADR-0014 evita).
+- **`core.trust.RAIZ_NO_ACOTA`**, una excepción y sólo una. Con `REDUCE_LISTA` y la raíz del motor
+  vacía, **ningún espacio podía declarar ninguna concesión nunca** — la misma trampa que ADR-0014
+  documenta para `writable_paths`, escrita otra vez. La salida no es clasificar el campo como
+  `PROPIO`, que dejaría a un proyecto aflojar lo que su cliente apretó: es reconocer que la raíz
+  del motor **no es un cliente** y no puede enumerar las necesidades operativas de espacios que no
+  conoce. Una prueba la fija en exactamente un campo para que no crezca en silencio, y la
+  monotonía entre capas reales queda intacta.
+
+Lo que **no** se afirma: `HARNESS_ROLE` es una variable de entorno, así que atenúa por rol
+DECLARADO y no por principal criptográfico; `Ê` sigue incompleto (`tar`, `python3 -c`); la
+contención de directorios es de un nivel (medido: 0,08 ms una lectura simple, 2,94 ms listando 43
+entradas); y el entorno se sigue heredando entero, que es la Capa 4 y está propuesta sin código.
+Diseño completo, alternativas descartadas y tradeoffs: ADR-0016.
+
 **Añadido — `scripts/preflight.py`, un solo sitio donde consta qué hay que cumplir** (2026-09-25)
 
 - **13 controles con el vocabulario de seis estados** y la regla que los ordena: **una

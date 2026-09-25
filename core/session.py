@@ -812,6 +812,45 @@ def build_brief(workspace: Path, *, runtime: str, role_id: str = "",
             L += ["- consulta: " + " · ".join(f"`{c}`" for c in policy.command_ask)]
         L.append("")
 
+    # Las concesiones de privilegio VIGENTES para este rol en esta máquina.
+    #
+    # Sin esto el mecanismo existe y nadie lo usa: un agente que no sabe que tiene una concesión
+    # se comporta como si no la tuviera, y el camino declarado —acotado y con rastro— se queda sin
+    # usar mientras el atajo opaco sigue ahí. Es la mitad de «parametrizar» que no es código.
+    #
+    # Se listan sólo las que APLICAN aquí y ahora. Enumerar las caducadas o las de otro host sería
+    # prometer autoridad que no hay, y el informe de sesión es justo donde eso no puede pasar: lo
+    # que dice se toma por cierto durante el resto de la sesión.
+    try:
+        from core.grants import cargar
+        from datetime import date
+        import platform as _plat
+
+        anfitrion = _plat.node()
+        rol_actual = role_id or ""
+        vigentes = [c for c in cargar(policy)
+                    if not c.problemas() and not c.caducada(date.today())
+                    and any(p == "*" or p == anfitrion for p in c.hosts)
+                    and any(p == "*" or p == rol_actual for p in c.roles)]
+        if vigentes:
+            L += ["**Concesiones de privilegio vigentes para ti en esta máquina.** Levantan un "
+                  "rechazo concreto y nada más: fuera de la forma que declaran, la regla general "
+                  "sigue en pie. Si la orden que necesitas no cae en ninguna, el camino es "
+                  "pedirla, no rodearla.", ""]
+            for c in vigentes:
+                cual = "se ejecuta" if c.human_approval == "once-per-grant" \
+                    else "lo confirma una persona cada vez"
+                L += [f"- `{c.id}` — {' · '.join(c.commands)} · efectos `{c.effects}`"
+                      + (" (verificados: si la orden escribe algo, la concesión NO aplica)"
+                         if c.effects == "read-only" else "")
+                      + f" · {cual} · vigente hasta {c.expires}"
+                      + (f" · {c.evidence}" if c.evidence else "")]
+            L.append("")
+    except Exception:                                                   # noqa: BLE001
+        # El informe NO se cae por no poder leer las concesiones. Omitir una capacidad que existe
+        # cuesta una sesión menos capaz; caerse cuesta la sesión entera.
+        pass
+
     # Lo que está asignado. Sólo cuando NO se abrió sobre una tarea concreta: si ya hay tarea,
     # repetir la lista entera distrae de la que se va a trabajar.
     if pending and not task:
