@@ -59,6 +59,25 @@ RAIZ_MOTOR = Path(__file__).resolve().parents[1]
 SUBARBOLES_MOTOR = ("core", "gates", "adapters")
 FICHEROS_MOTOR = ("refuto.py",)
 
+#: Y los ficheros de DATOS que deciden. La lista de arriba recorría sólo `*.py`, y eso dejó de
+#: describir lo que hace este módulo el día que `core/capabilities.py` entró en el guardián.
+#:
+#: Medido el 2026-09-25, antes de este cambio:
+#:
+#:     ficheros en la huella : 73
+#:     json en la huella     : []
+#:
+#: `roles/registry.json` (17 KB) alimenta `capacidades_de()` → `_no_shell`, `_no_secret_access`,
+#: `no_modify_verifier`, y esas restricciones **producen `DENY` en el guardián**. Quien lo
+#: editara cambiaba las decisiones del juez sin que `deriva_del_motor()` lo notara. La huella se
+#: quedó atrás en el mismo commit que volvió relevante al registro, que es como envejece una
+#: atestación: nada la obliga a cubrir lo que se añadió después.
+#:
+#: Se declaran por extensión Y por subárbol para que añadir un fichero de datos nuevo a un
+#: directorio ya cubierto entre en la huella solo, sin que nadie se acuerde.
+SUBARBOLES_DATOS = ("roles", "schemas", "policies")
+EXTENSIONES_DATOS = (".json",)
+
 
 def _sha_fichero(p: Path) -> str:
     h = hashlib.sha256()
@@ -85,6 +104,13 @@ def inventario_motor(raiz: Path | None = None) -> dict:
             if "__pycache__" in p.parts:
                 continue
             out[p.relative_to(base).as_posix()] = _sha_fichero(p)
+    for sub in SUBARBOLES_DATOS:
+        d = base / sub
+        if not d.is_dir():
+            continue
+        for p in sorted(d.rglob("*")):
+            if p.is_file() and p.suffix in EXTENSIONES_DATOS:
+                out[p.relative_to(base).as_posix()] = _sha_fichero(p)
     for nombre in FICHEROS_MOTOR:
         p = base / nombre
         if p.is_file():
