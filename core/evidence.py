@@ -12,6 +12,7 @@ audita dentro de un año es el JSONL.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -20,6 +21,71 @@ from pathlib import Path
 from core.model import now, provenance
 
 LEDGER = "ledger.jsonl"
+
+#: Con qué mecanismo se serializa `append_event`. Se expone para poder AFIRMARLO: una prueba
+#: que dijera «la cadena aguanta la concurrencia» sin saber si hubo bloqueo estaría midiendo la
+#: suerte del planificador.
+try:                                                                  # pragma: no cover
+    import fcntl as _fcntl
+    MECANISMO_DE_BLOQUEO = "fcntl.flock"
+except ImportError:                                                   # pragma: no cover
+    _fcntl = None
+    try:
+        import msvcrt as _msvcrt
+        MECANISMO_DE_BLOQUEO = "msvcrt.locking"
+    except ImportError:
+        _msvcrt = None
+        MECANISMO_DE_BLOQUEO = ""
+else:                                                                 # pragma: no cover
+    _msvcrt = None
+
+
+@contextlib.contextmanager
+def _exclusivo(fh):
+    """Bloqueo exclusivo sobre el diario mientras se lee la cabeza y se escribe el eslabón.
+
+    Por qué hace falta, medido el 2026-09-25
+    -----------------------------------------
+    `append_event` leía la cabeza y escribía sin serializar, y el argumento de que eso bastaba
+    —una escritura de menos de PIPE_BUF en modo `a` no se entrelaza— es correcto **sobre los
+    bytes** y no dice nada **sobre la cadena**. Dos guardianes concurrentes leen la misma cabeza
+    y emiten dos eventos con el mismo `prev`. Con 12 invocaciones simultáneas:
+
+        eventos escritos : 12
+        cadena ok        : False  (rota en la línea 3)
+        motivo           : «falta, sobra o se movió algún evento entre medias»
+
+    Es decir, el diario acusaba de MANIPULACIÓN lo que era concurrencia normal — y un agente de
+    código invoca herramientas en paralelo de forma rutinaria. Una alarma de integridad que
+    salta con el uso normal se aprende a ignorar, que es el mismo modo de muerte que este
+    repositorio ya documentó en `core.policy._partir` (comillas) y en `dd:*` (`ddev`).
+
+    Si no hay mecanismo de bloqueo se SIGUE escribiendo, sin bloquear. Perder el evento sería
+    peor que perder la serialización, y el estado queda declarado en `MECANISMO_DE_BLOQUEO`
+    para que nadie afirme una garantía que este proceso no tiene.
+    """
+    if _fcntl is not None:
+        _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+        try:
+            yield True
+        finally:
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None:                                           # pragma: no cover
+        fh.seek(0)
+        try:
+            _msvcrt.locking(fh.fileno(), _msvcrt.LK_LOCK, 1)
+        except OSError:
+            yield False       # no se pudo bloquear: se escribe igual y se declara
+            return
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                fh.seek(0)
+                _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)
+        return
+    yield False                                                       # pragma: no cover
 
 
 def ledger_path(workspace: Path) -> Path:
@@ -42,6 +108,35 @@ def _eslabon(previo: str, evento: dict) -> str:
     return hashlib.sha256((previo + "\n" + _canonico(evento)).encode("utf-8")).hexdigest()
 
 
+def _ultima_linea(fh) -> str:
+    """La última línea no vacía, leyendo desde el FINAL. `fh` abierto en binario.
+
+    La versión anterior hacía `read_text().splitlines()` del diario entero, y `append_event` la
+    llama en cada evento: el guardián leía el fichero completo antes de cada decisión. Con 1.779
+    eventos el coste es invisible; el diario es de sólo añadir, así que crece sin techo y el
+    coste con él — en el camino caliente, que es donde un control lento se acaba desactivando.
+
+    Se leen bloques desde el final hasta encontrar un salto de línea. El caso normal —la última
+    línea mide unos cientos de bytes— se resuelve con UNA lectura de 4 KiB.
+    """
+    fh.seek(0, os.SEEK_END)
+    fin = fh.tell()
+    if fin == 0:
+        return ""
+    bloque, datos, pos = 4096, b"", fin
+    while pos > 0:
+        paso = min(bloque, pos)
+        pos -= paso
+        fh.seek(pos)
+        datos = fh.read(paso) + datos
+        lineas = [ln for ln in datos.split(b"\n") if ln.strip()]
+        # Con más de una línea completa, la última ya está entera: sólo si `pos == 0` puede
+        # la primera estar cortada, y entonces no hay más fichero que leer.
+        if len(lineas) > 1 or pos == 0:
+            return lineas[-1].decode("utf-8", "replace") if lineas else ""
+    return ""
+
+
 def cabeza(workspace: Path) -> str:
     """La huella del último evento del diario, o `GENESIS` si no hay ninguno.
 
@@ -51,10 +146,11 @@ def cabeza(workspace: Path) -> str:
     path = ledger_path(workspace)
     if not path.is_file():
         return GENESIS
-    ultima = ""
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            ultima = line
+    try:
+        with path.open("rb") as fh:
+            ultima = _ultima_linea(fh)
+    except OSError:
+        return GENESIS
     if not ultima:
         return GENESIS
     try:
@@ -85,17 +181,35 @@ def append_event(workspace: Path, event: dict) -> None:
     posteriores. **Esto es tamper-EVIDENCIA, no tamper-proofing**: un adversario que reescriba
     la cadena ENTERA y todas sus copias publicadas produce un diario coherente. Lo que ya no
     puede es editar una línea y marcharse. Ver FORMAL-MODEL §3.5.
+
+    Leer la cabeza y escribir el eslabón es UNA operación
+    -----------------------------------------------------
+    Las dos van dentro del mismo bloqueo exclusivo (`_exclusivo`). Separarlas es lo que hacía
+    que dos guardianes concurrentes encadenaran los dos al mismo `prev` y produjeran un diario
+    que `verificar_cadena` declaraba manipulado. La atomicidad de los BYTES no da atomicidad de
+    la CADENA: son dos propiedades y sólo una se seguía de `O_APPEND`.
     """
     path = ledger_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    previo = cabeza(workspace)
-    record = {"ts": now(), **event, "prev": previo}
-    record["h"] = _eslabon(previo, record)
-    line = json.dumps(record, ensure_ascii=False) + "\n"
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(line)
-        fh.flush()
-        os.fsync(fh.fileno())
+    # `a+` y no `a`: hace falta LEER la cabeza con el bloqueo ya tomado. Leerla antes de
+    # abrir —como se hacía— deja la ventana entre la lectura y la escritura, que es justo la
+    # carrera. Se abre en binario porque `_ultima_linea` busca desde el final.
+    with path.open("a+b") as fh:
+        with _exclusivo(fh):
+            ultima = _ultima_linea(fh)
+            previo = GENESIS
+            if ultima:
+                try:
+                    previo = str(json.loads(ultima).get("h") or GENESIS)
+                except json.JSONDecodeError:
+                    previo = GENESIS
+            record = {"ts": now(), **event, "prev": previo}
+            record["h"] = _eslabon(previo, record)
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            fh.seek(0, os.SEEK_END)
+            fh.write(line.encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 def verificar_cadena(workspace: Path, esperado: str = "") -> dict:
