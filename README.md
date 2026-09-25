@@ -155,10 +155,11 @@ probado por la suite automática · `E4` observado en ejecución, fechado.
 
 | Afirmación | Nivel | Evidencia |
 |---|---|---|
-| La suite pasa entera | **E3** | `python3 refuto.py selftest` → **685/685, 1 omitida** (sólo Windows), 188 s. 2026-09-25, macOS arm64 (Darwin 25.4.0), Python 3.14.6 |
-| Reparto de la suite | **E2** | unit 413 · contract 55 · selftest 80 · adversarial 137 = **685**, contado con `ast` sobre métodos de clase y contrastado con el cargador de `unittest`, que descubre los mismos 685. `grep -rc "def test_"` da 686: uno vive dentro de una cadena. 2026-09-25 |
-| La suite pasa en **Linux** y en **Python 3.10**, el mínimo declarado | **E4** | GitHub Actions, corrida [36085934220](https://github.com/osvalois/refuto/actions/runs/36085934220), `ubuntu-latest`, matriz 3.10 y 3.13. 5 trabajos en verde. 2026-09-25 |
-| El preflight está verde salvo lo que declara informativo | **E4** | `python3 scripts/preflight.py` → **PASS, 13 controles**, 1 informativo con hallazgos (`refuto verify`). Incluye `ruff`, `bandit`, `gitleaks`, `actionlint`, `shellcheck` y datos personales. 2026-09-25, macOS arm64 |
+| La suite pasa entera | **E3** | `python3 refuto.py selftest` → **804/804, 1 omitida** (sólo Windows). 2026-09-25, macOS arm64 (Darwin 25.4.0), Python 3.14.6 |
+| Reparto de la suite | **E2** | unit 441 · contract 55 · selftest 80 · adversarial 228 = **804**, según el cargador de `unittest`, que es quien decide qué se ejecuta. `grep -rc "def test_"` no sirve para esto: da uno de más porque el texto aparece dentro de una cadena. 2026-09-25 |
+| **Estas cifras siguen dando eso** | **E3** | `python3 scripts/check_mediciones.py` compara la tabla con el árbol y CI lo ejecuta. Se añadió el 2026-09-25 porque las anteriores llevaban cinco commits desfasadas **con fecha del día**: declaraban 685 pruebas y 13 controles cuando eran 748 y 14 |
+| La suite pasa en **Linux** y en **Python 3.10**, el mínimo declarado | **E4** | GitHub Actions, corrida [36105021719](https://github.com/osvalois/refuto/actions/runs/36105021719) sobre `69bcd6a`, `ubuntu-latest`, matriz 3.10 y 3.13. 2026-09-25. Los cambios posteriores a ese commit **no** han pasado por CI todavía |
+| El preflight está verde | **E4** | `python3 scripts/preflight.py` → **PASS, 15 controles**. Incluye `ruff`, `bandit`, `gitleaks`, `actionlint`, `shellcheck`, datos personales y `refuto verify`. 2026-09-25, macOS arm64 |
 | El cliente MCP de refuto interroga a su propio servidor | **E3** | `tests/adversarial/test_mcp_server.py::TestElClientePropioLoInterroga` — `server/discover`, las dos revisiones de protocolo, la identidad y las 7 herramientas |
 | 13 puertas · 22 roles · 13 fases · 5 adapters | **E2** | `gates/base.py::GATES`, `roles/registry.json`, `core.lifecycle.PHASES`, `adapters/registry.py`. 2026-09-22 |
 | Sin dependencias de terceros | **E2** | `python3 scripts/check_stdlib_only.py` en local, 2026-09-22 |

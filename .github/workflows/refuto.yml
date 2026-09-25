@@ -85,6 +85,13 @@ jobs:
         # citas, 16 resolvían y 6 mentían — tres apuntaban a una línea en blanco.
         run: python3 scripts/check_citas.py
 
+      - name: Las mediciones del README siguen dando eso
+        # Las cifras ESTRUCTURALES ya las vigila `check_wiring`; las de CORRIDA no tenían
+        # vigilante, y son las que el README cita como E3/E4. Medido el 2026-09-25: la tabla
+        # declaraba 685 pruebas y 13 controles con fecha de ese mismo día, cuando eran 748 y
+        # 14 — cinco commits habían pasado por encima del commit que las puso al día.
+        run: python3 scripts/check_mediciones.py
+
       - name: Aseguramiento de diagramas de arquitectura
         run: |
           python3 scripts/generate_architecture_diagrams.py

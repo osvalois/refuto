@@ -23,10 +23,21 @@ Bloquea, informa, y la diferencia se declara
 --------------------------------------------
 `BLOQUEA` es lo que tiene que estar verde para empujar: si no lo está, el cambio no sale.
 `INFORMA` se mide y se imprime, y no retiene nada — porque su estado no lo decide este cambio.
-`refuto verify` está en `INFORMA` a propósito: hoy tiene dos puertas en rojo que son deuda
-declarada del proyecto (`G-SECURITY` con falsos positivos sobre su propia documentación y
-`G-PR` sobre commits anteriores), y un preflight que nace en rojo no se arregla: se desactiva
-con `--no-verify`, y entonces no protege de nada.
+Hoy **ningún control usa `INFORMA`**, y eso es un cambio del 2026-09-25 que conviene leer.
+
+`refuto verify` estaba ahí, con el motivo «deuda declarada del proyecto, no de este cambio». El
+motivo era cierto —comprobado con `git blame`: los 18 hallazgos de `G-SECURITY` vienen de
+`e28249c`, en `main`— y **nada lo comprobaba**. Un tier estático afirma para siempre algo que se
+midió una vez: el día que un cambio rompiera una puerta nueva, el preflight lo habría impreso
+como informativo y habría dado `PASS`. Es el mismo defecto que este repositorio persigue en
+otros sitios —una lista de excepciones que ya no describe nada, una cifra con fecha que dejó de
+ser cierta— aplicado al control que decide si algo sale.
+
+Ahora la deuda se declara **puerta a puerta** en `DEUDA_DECLARADA`, con su motivo, y `verify`
+es `BLOQUEA`: lo perdonado se puede enumerar, discutir y vaciar, y una puerta en rojo que no
+esté en esa tabla retiene el empujón. El mecanismo `INFORMA` se conserva porque el problema que
+resuelve es real y volverá a aparecer; que hoy no lo use nadie se dice aquí en vez de dejar un
+tier que parece en uso.
 
 Salida
 ------
@@ -88,7 +99,8 @@ _BANDIT_SKIP = {
 #: envejecen los controles hasta ser adorno: se conserva el hueco y se pierde el motivo.
 _PERSONALES_PERMITIDOS: set = set()
 
-#: Lo que `AGENTS.md` prohíbe, literalmente: «rutas `/Users/…`, correos».
+#: Lo que `AGENTS.md` prohíbe, literalmente: «rutas `/Users/…`, correos, hosts internos,
+#: direcciones privadas».
 #:
 #: `/home/…` se quedó FUERA a propósito, y por una medición: la primera versión lo incluía y
 #: marcó `tests/unit/test_govern.py` y `tests/unit/test_hygiene.py`, cuyas rutas son
@@ -96,7 +108,45 @@ _PERSONALES_PERMITIDOS: set = set()
 #: posición genéricos que la regla PRESCRIBE. Un detector que marca el cumplimiento de la norma
 #: enseña a ignorarlo, que es como mueren los controles. `/Users/` sí es inequívoco: es el
 #: directorio personal real de macOS y el ejemplo que la propia regla cita.
-_PERSONALES = re.compile(r"/Users/[A-Za-z0-9._-]+/|[A-Za-z0-9._%+-]+@(?:gmail|hotmail|outlook)\.com")
+#:
+#: Qué faltaba, y por qué importa que faltara
+#: -------------------------------------------
+#: La primera versión cubría `/Users/…` y tres dominios de correo personal, y el control se
+#: llamaba —y se reportaba— `datos-personales`. La norma que su propio docstring CITA prohíbe
+#: además correos corporativos, hosts internos y direcciones privadas. Un control cuyo alcance
+#: declarado excede al medido no es incompleto: es un `PASS` que afirma más de lo que comprobó,
+#: y este repositorio existe para no emitir esos. Medido el 2026-09-25 sobre el árbol rastreado:
+#: con la expresión ampliada el resultado sigue siendo **cero** ficheros, así que ampliarla no
+#: cuesta una excepción — sólo deja de mentir sobre lo que cubre.
+#:
+#: Los correos se aceptan en cualquier dominio salvo los de EJEMPLO que la propia regla
+#: prescribe (`example.com`, `example-org`…) y los `noreply` de los agentes, que son la forma
+#: correcta de firmar un commit y no identifican a nadie.
+_PERSONALES = re.compile(
+    r"/Users/[A-Za-z0-9._-]+/"
+    # correo de cualquier dominio; las exenciones van abajo, no en el patrón, para poder
+    # nombrarlas de una en una
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z]{2,})+"
+    # direcciones privadas RFC 1918 y enlace-local
+    r"|\b(?:10|192\.168|172\.(?:1[6-9]|2[0-9]|3[01])|169\.254)\.\d{1,3}\.\d{1,3}\b"
+    # hosts internos: los sufijos que sólo existen dentro de una red.
+    #
+    # `.local` NO está, y es la misma clase de decisión que dejar fuera `/home/…`. Medido el
+    # 2026-09-25 con él incluido: **47 coincidencias y cero hosts** — `settings.local.json`
+    # (44), `hooks.local.json` (2) y `.env.local` (1). `.local` es a la vez el TLD de mDNS y la
+    # convención más extendida para «variante local de este fichero de configuración», así que
+    # marcarlo pone en rojo ocho ficheros del repositorio por su nombre. Un detector que marca
+    # lo normal enseña a ignorarlo. Los demás sufijos no tienen ese uso.
+    r"|\b[A-Za-z0-9-]+\.(?:internal|intranet|corp|lan|home\.arpa)\b")
+
+#: Coincidencias de `_PERSONALES` que NO son un dato de nadie. Se exceptúan por VALOR y no
+#: ensanchando el patrón: una excepción que se puede enumerar se puede discutir, y una expresión
+#: regular con seis alternativas de escape no.
+_PERSONALES_INOCUOS = re.compile(
+    r"@(?:example|example-org|ejemplo|test|localhost|mi-servicio)\b"
+    r"|@[A-Za-z0-9.-]*\.example(?:\.[A-Za-z]{2,})?\b"
+    r"|\bnoreply@|\bnoreply\.|@users\.noreply\."
+    r"|\b(?:user|usuario|persona|alguien|nombre|correo|agente)@")
 
 
 def _datos_personales() -> tuple:
@@ -127,7 +177,10 @@ def _datos_personales() -> tuple:
             texto = ruta.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue                      # binario o ilegible: no es texto publicable
-        if _PERSONALES.search(texto):
+        # Coincidencia a coincidencia: basta UNA que no sea de ejemplo para marcar el fichero,
+        # y un fichero lleno de `user@example.com` no se marca por tenerlos.
+        if any(not _PERSONALES_INOCUOS.search(m.group(0))
+               for m in _PERSONALES.finditer(texto)):
             encontrados.add(rel)
 
     inesperados = sorted(encontrados - _PERSONALES_PERMITIDOS)
@@ -260,6 +313,8 @@ def _chequeos() -> list:
         Chequeo("esquemas", [py, "scripts/check_schemas.py"]),
         Chequeo("cableado", [py, "scripts/check_wiring.py"]),
         Chequeo("citas", [py, "scripts/check_citas.py"]),
+        Chequeo("mediciones", [py, "scripts/check_mediciones.py"],
+                porque="una cifra con fecha de hoy que hoy es falsa se lee como verificada"),
         Chequeo("diagramas", [py, "scripts/check_diagram_assurance.py"]),
         Chequeo("ruff", ["ruff", "check", "."], herramienta="ruff",
                 instalacion="brew install ruff   # o: pip install ruff==0.16.9",
@@ -282,9 +337,96 @@ def _chequeos() -> list:
         Chequeo("nombres-de-producto", funcion=_nombres_de_producto, turno=PERSONA,
                 porque="una lista de servicios en un repositorio público dice de qué "
                        "servicios hay credenciales; el mapa es casi tan útil como el valor"),
-        Chequeo("verify", [py, "refuto.py", "verify", "--offline"], tier=INFORMA,
-                porque="deuda declarada del proyecto, no de este cambio"),
+        Chequeo("verify", funcion=_verify_contra_la_deuda, tier=BLOQUEA, turno=AGENTE,
+                arreglo=f"{py} refuto.py verify --offline",
+                porque="la deuda conocida se declara puerta a puerta; una puerta nueva en rojo "
+                       "SÍ retiene el empujón"),
     ]
+
+
+#: Las puertas que `refuto verify` tiene hoy en rojo por deuda del PROYECTO, con el motivo y con
+#: lo que haría falta para cerrarlas. Una puerta que no esté aquí y salga en rojo **retiene el
+#: empujón**.
+#:
+#: Por qué esto en vez de marcar `verify` como informativo
+#: --------------------------------------------------------
+#: `verify` estaba en `INFORMA` con el motivo «deuda declarada del proyecto, no de este cambio».
+#: El motivo era cierto —comprobado con `git blame` el 2026-09-25: los 18 hallazgos de
+#: `G-SECURITY` vienen todos de `e28249c`, en `main`— y **nada lo comprobaba**. Un tier estático
+#: afirma para siempre algo que se midió una vez: el día que un cambio rompiera una puerta
+#: nueva, el preflight lo imprimiría como informativo y daría `PASS`.
+#:
+#: Es el mismo defecto que este repositorio persigue en otros sitios — una lista de excepciones
+#: que ya no describe nada, una cifra con fecha que dejó de ser cierta — aplicado al control que
+#: decide si algo sale. Aquí la excepción se declara por puerta, así que se puede enumerar,
+#: discutir y vaciar; y lo que no está declarado no se perdona.
+DEUDA_DECLARADA = {
+    "G-SECURITY": "18 falsos positivos del detector de secretos sobre su PROPIO código y sus "
+                  "pruebas (`core/digest.py`, `tests/unit/test_policy.py`), todos de `e28249c` "
+                  "— comprobado con `git blame`. Más `trivy` sin poder descargar su base.",
+    "G-PR": "ningún commit del historial cita un requisito, y falta `HUMAN_PR_REVIEW`: las dos "
+            "son del proceso del repositorio, no de un cambio concreto.",
+    "G-HUMAN": "5 revisiones humanas exigidas y 0 registradas. Por definición no las puede "
+               "cerrar un agente.",
+    "G-AGENT": "el manifiesto no declara agentes requeridos: ámbito vacío, que no aprueba.",
+    "G-LOCK": "el espacio no tiene `harness.lock.json`: nunca se ejecutó `refuto lock init`.",
+    "G-FLEET": "el manifiesto no declara orígenes que materializar: ámbito vacío.",
+    "G-SKILL": "no hay ninguna `SKILL.md` en el espacio: ámbito vacío.",
+    "G-TRACE": "no hay documento de requisitos: ámbito vacío.",
+}
+
+
+def clasificar_puertas(puertas: list, deuda: dict | None = None) -> tuple:
+    """El CRITERIO, separado de la ejecución. `(codigo, salida)`.
+
+    Vive aparte de `_verify_contra_la_deuda` para poder comprobarlo sin pagar los ~40 s de una
+    corrida real de puertas. No es cosmética: un criterio que sólo se puede ejercitar ejecutando
+    el sistema entero se prueba con un caso y se supone el resto, y lo que hay que fijar aquí
+    son los bordes —ámbito vacío, puerta nueva, deuda saldada—, que en una corrida real no
+    aparecen cuando uno quiere.
+
+    `0` todas las rojas tienen deuda declarada · `1` hay alguna que no · `2` no se pudo
+    comprobar, que no es lo mismo que estar bien.
+    """
+    deuda = DEUDA_DECLARADA if deuda is None else deuda
+    if not puertas:
+        return 2, "`refuto verify` no ejecutó ninguna puerta: un ámbito vacío no aprueba"
+
+    rojas = [g for g in puertas if g.get("status") not in ("PASS", "NOT_APPLICABLE")]
+    nuevas = [g for g in rojas if g.get("id") not in deuda]
+    perdonadas = [g for g in rojas if g.get("id") in deuda]
+    # Una entrada que ya no describe nada es como envejecen los controles hasta ser adorno: se
+    # conserva el hueco y se pierde el motivo. Se dice, y no se castiga.
+    saldadas = sorted(set(deuda) - {g.get("id") for g in rojas})
+
+    if nuevas:
+        detalle = " · ".join(f"{g.get('id')} → {g.get('status')}" for g in nuevas)
+        return 1, (f"{len(nuevas)} puerta(s) en rojo que NO son deuda declarada: {detalle}. "
+                   f"Esto sí lo decide este cambio.")
+    cola = f" · deuda ya saldada, retírela de DEUDA_DECLARADA: {', '.join(saldadas)}" \
+        if saldadas else ""
+    return 0, (f"{len(puertas)} puertas · {len(perdonadas)} en rojo, todas con deuda declarada "
+               f"({', '.join(sorted(g.get('id') for g in perdonadas))}){cola}")
+
+
+def _verify_contra_la_deuda() -> tuple:
+    """`refuto verify`, perdonando SÓLO las puertas cuya deuda está declarada. `(codigo, salida)`.
+
+    Esto ejecuta y lee el sobre; el criterio lo aplica `clasificar_puertas`.
+    """
+    argv = [sys.executable, "refuto.py", "verify", "--offline", "--json"]
+    try:
+        p = subprocess.run(argv, cwd=RAIZ, capture_output=True,   # nosec B603 — argv de lista
+                           timeout=1800, **TEXT_IO)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 2, f"no se pudo ejecutar `refuto verify`: {exc}"
+    try:
+        sobre = json.loads(p.stdout or "{}")
+        puertas = sobre["payload"]["gates"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return 2, (f"`refuto verify --json` no devolvió un sobre legible ({exc}). Sin poder "
+                   f"leer las puertas no se puede distinguir la deuda del defecto nuevo.")
+    return clasificar_puertas(puertas)
 
 
 def _ejecutar(ch: Chequeo) -> dict:
