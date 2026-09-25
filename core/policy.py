@@ -124,29 +124,46 @@ DEFAULT_SECRET_READ_DENY = (
     "**/auth.json", "**/.aws/credentials",
 )
 
-#: Nombres de variable de entorno con forma de credencial. Se comparan contra el NOMBRE, nunca
-#: contra el valor: mirar el valor de cada variable para decidir si es un secreto obligaría a
-#: leer todos los secretos para protegerlos.
+#: Nombres de variable de entorno con FORMA de credencial. Estructurales, nunca nombres de
+#: producto ni de servicio.
 #:
-#: Por qué hacía falta, medido el 2026-09-25 en el entorno de una sesión gobernada real: **70
-#: variables, 7 credenciales de verdad** —`OPENAI_API_KEY` de 164 caracteres,
-#: `GITHUB_PERSONAL_ACCESS_TOKEN`, `HALCON_ADMIN_API_KEY`, tres claves de API más y una
-#: contraseña—, todas legibles con un `printenv`. Asimetría neta: `.env` protegido contra
-#: escritura y el mismo secreto en una variable, libre.
+#: Se compara el NOMBRE y jamás el valor: mirar el valor de cada variable para decidir si es un
+#: secreto obligaría a leer todos los secretos para protegerlos.
 #:
-#: La lista está CURADA, y la curación es el trabajo. Un sondeo con `SESSION|AUTH|KEY` marcaba
-#: además `SSH_AUTH_SOCK` —que es la ruta de un socket, no un secreto, y quitarla rompe el agente
-#: de ssh—, `TERM_SESSION_ID`, `SECURITYSESSIONID` y `HARNESS_SESSION`, que es de refuto. Un
-#: detector que marca lo que no es enseña a ignorarlo, y entonces deja de proteger de lo que sí.
-#: Por eso se enumeran sufijos y familias concretas en vez de subcadenas sueltas.
+#: Por qué estructurales y no una lista de servicios
+#: -------------------------------------------------
+#: La primera versión de esta tabla enumeraba once nombres concretos de productos y servicios. Se
+#: retiraron por dos motivos, y el segundo es el que importa.
+#:
+#: 1. **Eran redundantes.** Comprobado uno a uno: los once ya los cubría un patrón de forma
+#:    —`*_TOKEN`, `*_API_KEY`, `*_PASSWORD`…—, así que retirarlos no quita cobertura. Y el
+#:    enfoque estructural alcanza además servicios que no existían al escribir esto, que es
+#:    justo lo que una lista de nombres no puede hacer: envejece en cuanto alguien contrata un
+#:    proveedor nuevo.
+#: 2. **Una lista de servicios en un repositorio público dice de qué servicios hay credenciales.**
+#:    No expone ningún valor y expone el mapa, que para alguien hostil es casi tan útil. En un
+#:    producto de gobierno esa asimetría es inaceptable: el control estaría publicando parte de
+#:    lo que existe para proteger.
+#:
+#: La misma regla vale para el ejemplo que se escriba en un comentario o en una prueba: se usa
+#: una forma inventada (`MI_SERVICIO_API_KEY`), nunca la de un proveedor real y menos la que haya
+#: en la máquina de quien lo escribió.
+#:
+#: Qué NO se marca, y es la mitad del trabajo
+#: ------------------------------------------
+#: Un sondeo con subcadenas sueltas (`SESSION|AUTH|KEY`) marcaba `SSH_AUTH_SOCK` —la ruta de un
+#: socket, y retirarla rompe el agente de ssh—, identificadores de sesión de terminal y la propia
+#: variable de refuto. Un detector que marca lo normal enseña a ignorarlo, y entonces deja de
+#: proteger de lo que sí. Por eso se enumeran sufijos, no fragmentos.
+#:
+#: Medido sobre un entorno real de 70 variables: `*_KEY` no añade **ni un** falso positivo, así
+#: que subsume a `*_API_KEY`, `*_SECRET_KEY`, `*_ACCESS_KEY` y `*_PRIVATE_KEY` sin coste.
 DEFAULT_SECRET_ENV_DENY = (
-    "*_API_KEY", "*_APIKEY", "*_SECRET", "*_SECRET_KEY", "*_ACCESS_KEY",
-    "*_ACCESS_TOKEN", "*_AUTH_TOKEN", "*_BEARER_TOKEN", "*_PRIVATE_KEY",
-    "*_PASSWORD", "*_PASSWD", "*_PASSPHRASE", "*_CREDENTIALS",
-    "*_TOKEN", "TOKEN", "PASSWORD", "SECRET",
-    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
-    "GITLAB_TOKEN", "NPM_TOKEN", "PYPI_TOKEN", "DOCKER_PASSWORD",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY",
+    "*_KEY", "*KEY",
+    "*_TOKEN", "TOKEN",
+    "*_SECRET", "SECRET",
+    "*_PASSWORD", "PASSWORD", "*_PASSWD", "*_PASSPHRASE",
+    "*_CREDENTIAL", "*_CREDENTIALS", "CREDENTIALS",
 )
 
 #: Órdenes que nunca se ejecutan. Cada una corresponde a una forma de perder trabajo o datos.
@@ -288,7 +305,7 @@ class Policy:
         """El patrón que marca ese NOMBRE de variable como credencial, o cadena vacía.
 
         Sin normalizar la ruta —no es una ruta— y sin mirar el valor. La comparación es
-        insensible a mayúsculas porque un entorno real mezcla `GITHUB_TOKEN` y `github_token`,
+        insensible a mayúsculas porque un entorno real mezcla `MI_SERVICIO_TOKEN` y `mi_servicio_token`,
         y un control que distingue por capitalización no controla nada.
         """
         n = (nombre or "").strip().upper()
@@ -591,14 +608,14 @@ def _lecturas_secretas(policy: Policy, ws: Path, lecturas, orden_cruda: str = ""
       `grep -r .`) no se detecta. Es incompleta, como `Ê ⊆ Effects`.
     - `tar czf t.tgz .` sale `opaco` del modelo de efectos: no declara lecturas, así que aquí no
       hay nada que mirar. La decisión llevará `opaco=True` y el diario lo registra.
-    - Una credencial en el ENTORNO (`printenv AWS_SECRET_ACCESS_KEY`) no es una ruta y no la ve
+    - Una credencial en el ENTORNO (`printenv MI_SERVICIO_API_KEY`) no es una ruta y no la ve
       esto. Hoy el agente hereda `os.environ` completo (`core/session.py`), así que el entorno es
       el hueco grande que queda — y es otra capa, no un olvido de ésta.
 
     Incompleta y sólida: lo que afirma, lo afirma. Ante la duda no inventa una coincidencia.
     """
     fuera = []
-    # Un volcado del entorno ENTERO. `printenv OPENAI_API_KEY` se atrapa por el nombre, y `env` a
+    # Un volcado del entorno ENTERO. `printenv MI_SERVICIO_API_KEY` se atrapa por el nombre, y `env` a
     # secas no declara ninguna lectura —medido: `efectos("env").lecturas == set()`— porque no hay
     # argumento que derivar. Es la vía más fácil de las dos, así que cerrar sólo la nombrada
     # habría sido cerrar la puerta y dejar la ventana.
@@ -621,7 +638,7 @@ def _lecturas_secretas(policy: Policy, ws: Path, lecturas, orden_cruda: str = ""
         if patron:
             fuera.append((lectura, patron))
             continue
-        # Una variable de ENTORNO con forma de credencial. `printenv OPENAI_API_KEY` y
+        # Una variable de ENTORNO con forma de credencial. `printenv MI_SERVICIO_API_KEY` y
         # `cat .env` son la misma pregunta por dos caminos, y tratarlas distinto es cómo se
         # queda uno de los dos sin mirar. Medido el 2026-09-25 en una sesión real: 70 variables
         # y 7 credenciales de verdad, todas legibles, mientras `.env` estaba protegido.

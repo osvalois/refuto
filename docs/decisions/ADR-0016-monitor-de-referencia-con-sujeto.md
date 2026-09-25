@@ -60,7 +60,7 @@ orden cualquiera por Bash rodeaba el control entero». Y el dato ya estaba:
 
 **F3 · El entorno se hereda entero.** `core/session.py:1079` hace `env = dict(os.environ)`.
 `clean_env` retira sólo variables de redirección de proveedor — su propósito es otro. Asimetría
-neta: `.env` protegido contra escritura y el mismo secreto en `$AWS_SECRET_ACCESS_KEY` de lectura
+neta: `.env` protegido contra escritura y el mismo secreto en `$MI_SERVICIO_API_KEY` de lectura
 libre con `printenv`.
 
 **F4 · `command_deny` colapsa cuatro dimensiones.** Los 16 patrones mezclan elevación de
@@ -155,15 +155,13 @@ de la sesión.
 
 ### Capa 4 · La credencial que vive en una variable *(implementada en parte)*
 
-Medido el 2026-09-25 en el entorno de una sesión gobernada real: **70 variables y 7 credenciales
-de verdad** —una clave de API de 164 caracteres, un token personal de GitHub, tres claves más y
-una contraseña—, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto
-en `$OPENAI_API_KEY`, libre.
+Medido el 2026-09-25 en el entorno de una sesión gobernada real: **70 variables y 7 con forma de credencial**, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto
+en `$MI_SERVICIO_API_KEY`, libre.
 
 **Lo implementado.** `secret_env_deny` (`ACUMULA`) compara el **nombre** de la variable, nunca el
 valor: mirar el valor de cada variable para decidir si es un secreto obligaría a leer todos los
 secretos para protegerlos. Se consulta en el MISMO canal de lectura que las rutas, porque
-`printenv OPENAI_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
+`printenv MI_SERVICIO_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
 
 Y la vía a granel, que es la fácil: `env`, `printenv`, `set` no declaran ninguna lectura
 —`efectos("env").lecturas == set()`, no hay argumento que derivar— así que se enumeran. Sólo se

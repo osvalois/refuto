@@ -148,17 +148,52 @@ contención de directorios es de un nivel (medido: 0,08 ms una lectura simple, 2
 entradas); y el entorno se sigue heredando entero, que es la Capa 4 y está propuesta sin código.
 Diseño completo, alternativas descartadas y tradeoffs: ADR-0016.
 
+**Corregido — nombres de producto y un inventario de credenciales en un repositorio público**
+(2026-09-25)
+
+Una retractación, y de las que importan. Al añadir `secret_env_deny` metí en la lista de fábrica
+**once nombres concretos de servicios** —los proveedores de nube y de modelos más habituales— y,
+en un comentario de `core/policy.py`, el inventario de qué credenciales había en la máquina donde
+lo medí, **incluida una con el nombre de un cliente**. Se empujó a un repositorio público.
+
+No se expuso ningún valor. Se expuso el **mapa**: de qué servicios hay credenciales y en qué
+máquina. Para alguien hostil eso es casi tan útil, y en un producto de gobierno la asimetría es
+inaceptable — el control estaría publicando parte de lo que existe para proteger. `AGENTS.md` ya
+lo prohibía en prosa desde el principio.
+
+- **La lista pasa a ser puramente estructural** (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`…):
+  13 patrones de forma en vez de 28 con nombres dentro. **No pierde cobertura**, comprobado uno a
+  uno: los once nombres ya los cubría un patrón. Y gana — el enfoque estructural alcanza servicios
+  que no existían al escribirlo, que es justo lo que una lista de marcas no puede hacer, porque
+  envejece en cuanto alguien contrata un proveedor nuevo. Medido: `*_KEY` no añade **ni un** falso
+  positivo sobre un entorno real de 70 variables.
+- **Control nuevo en el preflight: `nombres-de-producto`.** La regla existía en prosa y no la
+  comprobaba nada sobre el código — el control de datos personales miraba rutas y correos. Un
+  control que depende de que quien escribe se acuerde no es un control. Busca
+  `<MARCA>_…_<SUFIJO_DE_CREDENCIAL>` sobre el árbol rastreado, con cuatro ficheros declarados
+  legítimos y su motivo (`core/provider.py` existe para reconocer esas variables; sin nombrarlas
+  no hay nada que reconocer).
+- **Por qué ese patrón y no «cualquier mención de una marca»:** la primera versión del control
+  marcaba cualquier aparición y dio **28 ficheros** —`gemini` es un runtime soportado y se nombra
+  en todas partes, con razón—. 28 hallazgos sobre 0 defectos es la definición de un control que
+  se desactiva en una semana. Afinado al defecto que de verdad hubo: **5 ficheros, y uno era el
+  mío**.
+- Los ejemplos de comentarios y pruebas usan ahora una forma inventada (`MI_SERVICIO_API_KEY`),
+  que es lo que `AGENTS.md` prescribe para todo lo demás.
+
+**Lo que esto NO deshace:** los nombres están en el historial publicado de `f045aa4`. Reescribir
+historia publicada exige `git push --force`, que la política de este espacio rechaza; queda como
+decisión de una persona, con la alternativa de rotar lo que se nombró.
+
 **Añadido — la credencial que vive en una variable, no en un fichero** (2026-09-25)
 
-Medido en el entorno de una sesión gobernada real: **70 variables y 7 credenciales de verdad** —
-una clave de API de 164 caracteres, un token personal de GitHub, tres claves más y una
-contraseña—, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto en
-`$OPENAI_API_KEY`, libre.
+Medido en el entorno de una sesión gobernada real: **70 variables y 7 con forma de credencial**, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto en
+`$MI_SERVICIO_API_KEY`, libre.
 
 - **`secret_env_deny`** (`ACUMULA`) compara el **nombre** de la variable, nunca el valor: mirar el
   valor de cada una para decidir si es un secreto obligaría a leer todos los secretos para
   protegerlos. Se consulta en el MISMO canal de lectura que las rutas, porque
-  `printenv OPENAI_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
+  `printenv MI_SERVICIO_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
 - **La vía a granel, que es la fácil.** `env`, `printenv`, `set` no declaran ninguna lectura
   —`efectos("env").lecturas == set()`, no hay argumento que derivar— así que se enumeran. Sólo se
   pregunta si el entorno tiene de verdad alguna variable con forma de credencial: en una máquina

@@ -61,7 +61,7 @@ BLOQUEA, INFORMA = "bloquea", "informa"
 #: Medido el 2026-09-25: sin supresiones, `bandit` daba **70 hallazgos y cero defectos reales**.
 #: 61 eran la familia `subprocess` —que es literalmente el trabajo de refuto: sondear agentes—,
 #: 5 eran `B105` disparando sobre `PASS = "PASS"` y sobre los NOMBRES de variables de entorno
-#: (`ANTHROPIC_AUTH_TOKEN`), y 2 eran `B108` sobre `/tmp/claude-*/**`, que es un patrón de
+#: (`MI_SERVICIO_AUTH_TOKEN`), y 2 eran `B108` sobre un patrón de ruta de la política, que es
 #: política y no un fichero temporal. Un control con 70 falsos positivos se desactiva en una
 #: semana; con estas seis supresiones queda en 0 y sirve para lo que viene después.
 _BANDIT_SKIP = {
@@ -143,6 +143,91 @@ def _datos_personales() -> tuple:
     return 0, f"{len(encontrados)} fichero(s) con coincidencia, todos declarados"
 
 
+#: Marcas de proveedor que, formando el nombre de una variable de CREDENCIAL, no deben aparecer
+#: en el árbol rastreado.
+#:
+#: Por qué existe este control, y es una retractación
+#: --------------------------------------------------
+#: El 2026-09-25 añadí a la lista de fábrica de `secret_env_deny` once nombres concretos de
+#: servicios y, en un comentario, el inventario de qué credenciales había en la máquina donde lo
+#: medí — **incluida una con el nombre de un cliente**. Todo eso se empujó a un repositorio
+#: PÚBLICO.
+#:
+#: No se expuso ningún valor. Se expuso el MAPA: de qué servicios hay credenciales. Para alguien
+#: hostil eso es casi tan útil, y en un producto de gobierno la asimetría es inaceptable — el
+#: control estaría publicando parte de lo que existe para proteger. `AGENTS.md` ya lo prohibía en
+#: prosa y nada lo comprobaba sobre el CÓDIGO: el control de datos personales miraba rutas y
+#: correos. Un control que depende de que quien escribe se acuerde no es un control.
+#:
+#: Por qué `<MARCA>_…_<SUFIJO>` y no «cualquier mención de una marca»
+#: ------------------------------------------------------------------
+#: La primera versión marcaba cualquier aparición de un nombre de proveedor y dio **28
+#: ficheros** — `gemini` es un runtime soportado y se nombra en todas partes, con razón. 28
+#: hallazgos sobre 0 defectos es la definición de un control que se desactiva en una semana, que
+#: es justo lo que este guion documenta en otras cuatro tablas. Afinado a «una marca formando el
+#: nombre de una variable de credencial», que es EL defecto que hubo, da **5 ficheros y uno era
+#: el mío**. Medido, no estimado.
+_MARCAS = ("AWS", "AMAZON", "AZURE", "GCP", "GOOGLE", "GITHUB", "GH", "GITLAB", "BITBUCKET",
+           "OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK", "MISTRAL", "COHERE", "HUGGINGFACE",
+           "NPM", "PYPI", "DOCKER", "STRIPE", "TWILIO", "SENDGRID", "SLACK", "NOTION",
+           "SUPABASE", "VERCEL", "NETLIFY", "CLOUDFLARE", "DATADOG", "SENTRY", "AUTH0",
+           "CLAUDE")
+_SUFIJOS_CREDENCIAL = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
+                       "CREDENTIALS", "PASSPHRASE")
+
+#: Dónde SÍ es legítimo, con el motivo. Cuatro, y se cuentan.
+#:
+#: `core/provider.py` y su prueba existen para RECONOCER la redirección de un proveedor concreto:
+#: sin nombrarlo no hay nada que reconocer. `core/digest.py` lleva las firmas de secreto por
+#: proveedor, que es lo mismo. Marcarlos obligaría a desactivar el control, y entonces no
+#: protegería de nada.
+_MARCAS_PERMITIDAS = {
+    "core/provider.py": "su trabajo es detectar la redirección de un proveedor concreto",
+    "core/digest.py": "lleva las firmas de secreto por proveedor, que es su función",
+    "tests/unit/test_provider.py": "prueba el detector de redirección de proveedor",
+    "tests/unit/test_session.py": "comprueba que el informe avisa de una redirección concreta",
+}
+
+
+def _nombres_de_producto() -> tuple:
+    """Marcas de proveedor formando un nombre de credencial. `(codigo, salida)`.
+
+    Se mira sólo lo RASTREADO por git: lo ignorado no se publica, y es publicar lo que convierte
+    un nombre en exposición.
+    """
+    import re as _re
+
+    try:
+        p = subprocess.run(["git", "ls-files", "-z"], cwd=RAIZ,  # nosec B603,B607
+                           capture_output=True, timeout=60, **TEXT_IO)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 2, f"no se pudo listar el árbol rastreado: {exc}"
+    if p.returncode != 0:
+        return 2, f"`git ls-files` salió con {p.returncode}: no se pudo comprobar"
+
+    patron = _re.compile(r"\b(" + "|".join(_MARCAS) + r")(_[A-Z0-9]+)*_("
+                         + "|".join(_SUFIJOS_CREDENCIAL) + r")\b")
+    hallados = {}
+    for rel in (p.stdout or "").split("\0"):
+        if not rel.strip() or rel in _MARCAS_PERMITIDAS:
+            continue
+        try:
+            texto = (RAIZ / rel).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        nombres = sorted({m.group(0) for m in patron.finditer(texto)})
+        if nombres:
+            hallados[rel] = nombres
+    if hallados:
+        detalle = " · ".join(f"{r} ({', '.join(n[:2])})"
+                             for r, n in sorted(hallados.items())[:5])
+        return 1, (f"{len(hallados)} fichero(s) nombran un proveedor en una variable de "
+                   f"credencial: {detalle}. Use una forma inventada (`MI_SERVICIO_API_KEY`) o "
+                   f"declare el fichero en `_MARCAS_PERMITIDAS` con su motivo")
+    return 0, (f"ninguna marca en un nombre de credencial fuera de los "
+               f"{len(_MARCAS_PERMITIDAS)} ficheros donde es legítimo")
+
+
 class Chequeo:
     """Un control, su comando y de quién es el turno si falla.
 
@@ -192,6 +277,9 @@ def _chequeos() -> list:
                 herramienta="shellcheck", instalacion="brew install shellcheck"),
         Chequeo("datos-personales", funcion=_datos_personales, turno=PERSONA,
                 porque="el repositorio es público desde el 2026-09-25: lo que entra, sale"),
+        Chequeo("nombres-de-producto", funcion=_nombres_de_producto, turno=PERSONA,
+                porque="una lista de servicios en un repositorio público dice de qué "
+                       "servicios hay credenciales; el mapa es casi tan útil como el valor"),
         Chequeo("verify", [py, "refuto.py", "verify", "--offline"], tier=INFORMA,
                 porque="deuda declarada del proyecto, no de este cambio"),
     ]
