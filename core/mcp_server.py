@@ -148,6 +148,30 @@ def _argv_de(nombre: str, args: dict, *, raiz: Path) -> list:
     destino = Path(ws).expanduser()
     if not destino.is_dir():
         raise ValueError(f"`workspace` no es un directorio existente: {destino}")
+    # El `workspace` lo aporta el MODELO, y `refuto_verify` ESCRIBE (`.harness/evidence/`). Sin
+    # esta comprobación, un agente podía nombrar cualquier directorio de la máquina y sembrarlo.
+    #
+    # Medido el 2026-09-25 sobre un directorio recién creado, fuera de todo espacio gobernado:
+    #
+    #     .harness/evidence/ledger.jsonl · sbom.json · ver_edb734a4c5f14c66.json
+    #
+    # No es destrucción ni exfiltración: es escritura no solicitada, y la doctrina del producto
+    # sobre eso ya está escrita en `external_write_allow` —fuera del espacio sólo se escribe en
+    # raíces DECLARADAS—. Esta superficie la rodeaba por no preguntarse cuál es el espacio.
+    #
+    # El criterio es el más estrecho que no cierra ningún uso real: o es el directorio desde el
+    # que se lanzó el servidor, o es un espacio que YA está gobernado. Verificar un directorio
+    # que nunca fue un espacio no informa de nada —`refuto verify` allí deja casi todas las
+    # puertas en `BLOCKED` por falta de manifiesto y de política— así que lo único que se
+    # pierde es la siembra. Materializar un espacio nuevo es `refuto init`, que esta superficie
+    # no expone a propósito.
+    if destino.resolve() != raiz.resolve() and not (destino / ".harness").is_dir():
+        raise ValueError(
+            f"«{destino}» no es un espacio gobernado: no tiene `.harness/`. Esta superficie no "
+            f"materializa espacios —`init` no se expone— y `verify` escribe evidencia, así que "
+            f"apuntarla a un directorio cualquiera lo sembraría sin informar de nada. Ejecute "
+            f"`refuto init` ahí una vez, o llame sin `workspace` para usar "
+            f"«{raiz.resolve()}».")
 
     argv = ["--workspace", str(destino.resolve()), *herr["argv"]]
     if "gate" in args:
