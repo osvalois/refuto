@@ -349,12 +349,30 @@ def main(argv: list | None = None) -> int:
     if fact["structured_reply"]:
         mapping = {ALLOW: "allow", DENY: "deny", ASK: "ask"}
         motivo = decision.reason or "política de refuto"
+        nombre = mapping[decision.outcome]
         if aviso:
             motivo = f"{motivo}\n\n⚠ {aviso}"
+            # Un fallo de auditoría no es «todo bien». Con respuesta estructurada el aviso
+            # viajaba en el texto y la decisión seguía siendo `allow`, así que la escritura
+            # ocurría igual: el rastro se cortaba y nadie lo echaba en falta — que es lo que
+            # `_emit_event` dice existir para impedir.
+            #
+            # Medido el 2026-09-25 con el diario inescribible y una escritura que aprobaría:
+            #
+            #     claude                     allow   ← la escritura ocurre
+            #     kiro · gemini · opencode   exit 2  ← bloquea
+            #     antigravity                ask
+            #
+            # Tres respuestas al mismo hecho, y la permisiva era la del runtime principal.
+            # `_main_antigravity` ya hacía esto; aquí faltaba. Se iguala al más prudente de los
+            # dos dialectos estructurados: `ask`, no `deny` — el trabajo no se pierde, lo
+            # decide una persona.
+            if nombre == "allow":
+                nombre = "ask"
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": mapping[decision.outcome],
+                "permissionDecision": nombre,
                 "permissionDecisionReason": motivo,
             }
         }, ensure_ascii=False))
