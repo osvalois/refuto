@@ -22,9 +22,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from core.digest import excerpt, sha256_text
-from core.evidence import append_event, verdict_of
+from core.evidence import append_event
 from core.model import (
-    BLOCKED, FAIL, KIND_ORCHESTRATION, NOT_EXECUTABLE, PASS, new_id, now, provenance,
+    BLOCKED, FAIL, KIND_ORCHESTRATION, NOT_EXECUTABLE, new_id, now, provenance,
     write_json,
 )
 from core.proc import TEXT_IO, spawn_kwargs
@@ -223,7 +223,6 @@ def execute_step(run: Run, step: StepResult, ctxobj: dict, *, dry_run: bool = Tr
     tenga que saber nada del método concreto: refuto gobierna el proceso, no lo escribe.
     """
     import time
-    from adapters.registry import ADAPTERS
     from core.roles import load as load_roles
 
     workspace = Path(run.workspace)

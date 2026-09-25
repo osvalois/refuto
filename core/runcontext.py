@@ -17,7 +17,6 @@ que `refuto resume` tiene que detectar antes de continuar.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -97,7 +96,7 @@ def build(workspace: Path, *, roots: list | None = None, deep: bool = False,
     """Construye el contexto completo. No modifica nada fuera de `.harness/context/`."""
     from adapters.registry import ADAPTERS, all_specs
     from core.capability import build as build_caps
-    from core.discovery import discover, scan_tools
+    from core.discovery import discover
     from core.policy import Policy
     from core.probe import probe_all
     from core.roles import load as load_roles, validate_registry

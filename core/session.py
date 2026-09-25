@@ -104,7 +104,10 @@ def _bajo_oculto(p: Path, workspace: Path, pattern: str = "") -> bool:
     pat = Path(pattern).parts[:-1]
     if len(pat) != len(partes):
         return any(s.startswith(".") for s in partes)
-    return any(s.startswith(".") and "*" in ps for s, ps in zip(partes, pat))
+    # `strict=True`: las dos secuencias se han comprobado del mismo largo tres líneas arriba,
+    # así que un desajuste sería un defecto y no un caso a truncar en silencio.
+    return any(s.startswith(".") and "*" in ps
+               for s, ps in zip(partes, pat, strict=True))
 
 
 #: Lo que NUNCA se versiona de `.harness/`, y por qué cada uno.

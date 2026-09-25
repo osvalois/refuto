@@ -10,7 +10,6 @@ no encontraba la ruta en esta carga y APROBABA la escritura en la política.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -23,7 +22,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.proc import TEXT_IO  # noqa: E402
 
 
 def _guard(workspace: Path, payload, runtime: str = "antigravity") -> tuple[int, str, str]:
@@ -192,7 +190,7 @@ class TestInstalacion(unittest.TestCase):
 
     def test_install_engancha_antigravity_cuando_esta_presente(self):
         import importlib
-        refuto = importlib.import_module("refuto")
+        importlib.import_module("refuto")   # el efecto es la importación, no el nombre
         from core import wire
         (self.ws / ".agents").mkdir()
         subprocess.run(["git", "init", "-q", str(self.ws)], capture_output=True)

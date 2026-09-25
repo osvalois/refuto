@@ -12,7 +12,7 @@ instalación, firma y arranque observados. VERIFIED se exige a mano, con `--deep
 from __future__ import annotations
 
 from core.model import (
-    BLOCKED, CRITICAL, Evidence, FAIL, Finding, HIGH, INSTALLED, NOT_INSTALLED, PASS,
+    BLOCKED, CRITICAL, Evidence, FAIL, Finding, HIGH, PASS,
     Result, FUNCTIONAL, rung,
 )
 from core.probe import probe_all

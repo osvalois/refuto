@@ -9,10 +9,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import unittest
 from pathlib import Path
 
-from core.model import BLOCKED, FAIL, NOT_EXECUTABLE, PASS
+from core.model import BLOCKED, FAIL, PASS
 from gates.base import run_gate
 from tests.fixtures import AKIA_SINTETICA, Workspace
 from tests.selftest.test_gates import GateCase

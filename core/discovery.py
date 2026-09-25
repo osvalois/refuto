@@ -237,7 +237,7 @@ def inspect_core(path: Path) -> Scored:
         # nunca — y esa es la protección contra confundir una carpeta con un framework.
         for label, weight, names in CORE_SIGNALS[1:]:
             if any((path / n).exists() for n in names):
-                scored.add(label, weight * 0.4, f"presente, pero sin manifiesto que lo declare")
+                scored.add(label, weight * 0.4, "presente, pero sin manifiesto que lo declare")
         cand.problems.append("no hay manifiesto: no se puede verificar qué debería contener")
         scored.payload = asdict(cand)
         return scored

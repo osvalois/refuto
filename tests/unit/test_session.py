@@ -426,7 +426,6 @@ class TestElGitignoreDelEspacio(unittest.TestCase):
         # sobre el mismo espacio la denunciaba como concurrente. La sesión es el abuelo
         # (claude → shell → python), no el padre, y sólo se excluía al padre.
         import subprocess, sys
-        from core.session import sesiones_vivas
         with Workspace("ses-abuelo") as ws:
             marca = str(ws.root / ".harness/state/session-brief.md")
             hijo = (f"import sys; sys.path.insert(0, {str(HARNESS)!r}); "

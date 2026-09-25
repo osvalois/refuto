@@ -26,7 +26,6 @@ corren siempre.
 from __future__ import annotations
 
 import concurrent.futures as futures
-import json
 import os
 import platform
 import shutil
@@ -36,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from core import acp
-from core.digest import excerpt, sha256_file
+from core.digest import excerpt
 from core.model import (
     AGENT_VERIFIED, FUNCTIONAL, INSTALLED, NOT_INSTALLED, STARTABLE, rung,
 )

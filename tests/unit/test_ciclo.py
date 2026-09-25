@@ -173,7 +173,6 @@ class TestMotor(unittest.TestCase):
 
     def test_una_fase_con_revision_obligatoria_no_termina_sola(self):
         """Aunque el agente diga que acabó y las puertas pasen: falta una persona."""
-        from core import humanreview as HR
         from core.run import execute_step
         with Workspace("hr-block") as ws:
             repo(ws); ws.manifest(); ws.policy()
