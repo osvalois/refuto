@@ -194,6 +194,84 @@ class TestLaResolucionFallaCerrada(unittest.TestCase):
             self.assertIn("El padre cambió", d["permissionDecisionReason"])
 
 
+#: Un padre con listas de MÁS DE UN elemento. Con una sola entrada, «reordenar» no es nada
+#: y la prueba del orden pasaría sin tocar el mecanismo.
+CLIENTE_ORDENABLE = {
+    "schema": "harness.policy/v1", "name": "cliente", "version": "1",
+    "command_deny": ["herramienta-solo-del-cliente:*", "otra-del-cliente:*"],
+    "protected_paths": ["secretos-del-cliente/**", "contratos-del-cliente/**"],
+}
+
+
+class TestElAnclaDaLaVueltaEntera(unittest.TestCase):
+    """El caso POSITIVO de `--anchor`, que nunca se había escrito.
+
+    Las dos pruebas del ancla que ya existían —`test_el_padre_cambio_bajo_el_ancla`, aquí
+    arriba, y `M8` en `test_monotonia`— sólo exigen que un padre ALTERADO se detecte. Las
+    dos pasaban mientras `--anchor` estaba roto de raíz, porque daban el veredicto correcto
+    por el motivo equivocado: el ancla se escribía con el digest del documento DECLARADO
+    (`documento_hijo`) y se comprobaba contra el COMPUESTO con la norma base
+    (`politica_efectiva`), así que NINGÚN ancla casaba nunca y todo caía a
+    `NOT_EXECUTABLE`.
+
+    Medido el 2026-09-24 en un espacio real: ancla `41164aa7…`, comprobación `7738a16e…`,
+    con el fichero del padre sin tocar desde antes de escribirse el ancla. El mensaje
+    afirmaba «el padre cambió» sobre un padre intacto.
+
+    Un aserto negativo no puede distinguir «el mecanismo funciona» de «el mecanismo está
+    roto y falla siempre». Hace falta el positivo, y va por el guardián: que resuelva no
+    basta, tiene que gobernar.
+    """
+
+    def _con_ancla(self, ws, padre: dict):
+        from core.refinement import documento_hijo
+        hijo = documento_hijo("proyecto", "cliente.json", padre_doc=padre)
+        self.assertIn("extends_digest", hijo, "`documento_hijo` no ancló nada que probar")
+        _montar(ws, hijo, padre=padre)
+        return hijo
+
+    def test_un_ancla_recien_escrita_resuelve_y_gobierna(self):
+        with Workspace("anc-ida-vuelta") as ws:
+            self._con_ancla(ws, CLIENTE_ORDENABLE)
+            d = _guardian(ws, comando=ORDEN_DEL_CLIENTE)
+            self.assertEqual("deny", d["permissionDecision"],
+                             "un ancla escrita por el propio producto no dio la vuelta: el "
+                             "espacio quedó sin gobierno nada más instalarlo")
+            self.assertIn("herramienta-solo-del-cliente", d["permissionDecisionReason"])
+            self.assertEqual("allow", _guardian(ws, comando="echo hola")["permissionDecision"],
+                             "resolvió denegándolo todo, que no es resolver")
+
+    def test_reordenar_una_lista_del_padre_no_es_un_cambio(self):
+        """`protected_paths` es un conjunto. Que se escriba en otro orden no cambia qué
+        protege, y no puede invalidar la identidad de quien hereda de él."""
+        with Workspace("anc-orden") as ws:
+            self._con_ancla(ws, CLIENTE_ORDENABLE)
+            revuelto = dict(CLIENTE_ORDENABLE)
+            for campo in ("command_deny", "protected_paths"):
+                revuelto[campo] = list(reversed(CLIENTE_ORDENABLE[campo]))
+            (ws.root / ".harness" / "cliente.json").write_text(
+                json.dumps(revuelto), encoding="utf-8", newline="\n")
+            d = _guardian(ws, comando=ORDEN_DEL_CLIENTE)
+            self.assertEqual("deny", d["permissionDecision"],
+                             "reordenar dos patrones rompió el ancla: una falsa alarma que "
+                             "deja el espacio inoperante sin que la política haya cambiado")
+            self.assertNotIn("cambió", d["permissionDecisionReason"],
+                             "denegó, pero acusando al padre de haber cambiado")
+
+    def test_alterar_de_verdad_al_padre_sigue_rompiendo_el_ancla(self):
+        """El control que impide arreglar lo anterior aflojando el ancla."""
+        with Workspace("anc-cambio") as ws:
+            self._con_ancla(ws, CLIENTE_ORDENABLE)
+            otro = dict(CLIENTE_ORDENABLE)
+            otro["command_deny"] = ["herramienta-solo-del-cliente:*"]   # retira una regla
+            (ws.root / ".harness" / "cliente.json").write_text(
+                json.dumps(otro), encoding="utf-8", newline="\n")
+            d = _guardian(ws, comando="echo hola")
+            self.assertEqual("deny", d["permissionDecision"],
+                             "el padre cambió de verdad y el ancla no se enteró")
+            self.assertIn("cambió", d["permissionDecisionReason"])
+
+
 class TestUnaSolaSemantica(unittest.TestCase):
     """`Policy.load` y `refuto policy refine` no pueden dar respuestas distintas."""
 

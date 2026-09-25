@@ -27,13 +27,12 @@ Tres invariantes, y las tres se prueban en `tests/adversarial/`:
 
 from __future__ import annotations
 
-import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.digest import sha256_file
-from core.model import FAIL, BLOCKED, Finding, PASS, Result, now
+from core.model import (BLOCKED, FAIL, Finding, NOT_APPLICABLE, PASS, Result, Scope, now)
 from core.proc import TEXT_IO
 
 LOCK_SCHEMA = "harness.lock/v1"
@@ -158,7 +157,8 @@ def verify(workspace: Path, lock: dict | None, *, check_remote: bool = False) ->
             else:
                 observations.append(f"«{name}»: la referencia «{ref}» sigue en {commit[:12]}…")
 
-    measure = (f"{len(lock.get('sources') or {})} orígenes · {total_files} archivos anclados · "
+    n_origenes = len(lock.get("sources") or {})
+    measure = (f"{n_origenes} orígenes · {total_files} archivos anclados · "
                f"{len(findings)} desviaciones"
                + ("" if check_remote else " · origen remoto NO comprobado (use --check-remote)"))
     if not check_remote:
@@ -166,7 +166,29 @@ def verify(workspace: Path, lock: dict | None, *, check_remote: bool = False) ->
             "Sin --check-remote esta puerta comprueba deriva LOCAL. Una etiqueta movida en el "
             "origen sólo se detecta consultando el origen.")
 
+    # Ámbito vacío. `PASS if not findings` no consultaba `total_files`, así que un lock con
+    # `sources: {}` —o con un origen declarado y CERO ficheros anclados— aprobaba con la
+    # medida «0 archivos anclados · 0 desviaciones» escrita en voz alta. Medido el
+    # 2026-09-23, tres formas del mismo cero. Comparar cero huellas contra cero huellas es
+    # cierto y no demuestra nada sobre el origen. Ver FORMAL-MODEL §3.3.
+    if total_files == 0 and not findings:
+        if n_origenes == 0:
+            return Result(gate_id, title, NOT_APPLICABLE, threshold=threshold,
+                          scope=Scope(0, 0, "archivos anclados", declared=False),
+                          measure="no aplica en este espacio — el lock no declara ningún "
+                                  "origen que materializar, luego no hay huella que "
+                                  "comparar. No es un aprobado: no se comprobó nada.",
+                          observations=observations)
+        return Result(gate_id, title, BLOCKED, threshold=threshold,
+                      scope=Scope(0, 0, "archivos anclados", declared=True),
+                      measure=f"no se intentó — el lock declara {n_origenes} origen(es) y "
+                              f"CERO archivos anclados. Un origen sin huellas no ancla nada: "
+                              f"el árbol podría ser cualquiera y la comprobación saldría "
+                              f"igual. Ejecute `refuto lock update`.",
+                      observations=observations)
+
     return Result(gate_id, title, PASS if not findings else FAIL, threshold=threshold,
+                  scope=Scope(total_files, 0, "archivos anclados", declared=n_origenes > 0),
                   measure=measure, findings=findings, observations=observations)
 
 

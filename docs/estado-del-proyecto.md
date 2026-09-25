@@ -64,26 +64,44 @@ puede ocurrir.
 
 ## Riesgos y divergencias abiertas
 
-**1 · El vocabulario de estados del código no es el del contrato.** `core/model.py` implementa
-`PASS FAIL BLOCKED NOT_EXECUTABLE`. El contrato declarado añade `NOT_RUN`, `INCONCLUSIVE` y
-`NOT_APPLICABLE`. Consecuencia observada (`E2`, 2026-09-22): `gates/g_sdd.py` reporta `BLOCKED`
-para decir «aquí no aplica», que semánticamente es `NOT_APPLICABLE`; `gates/g_agent.py`,
-`g_fleet.py`, `g_human.py` y `g_trace.py` usan `BLOCKED` para «no había nada que comprobar».
+> **Revisión del 2026-09-23.** Una auditoría adversarial midió esta lista contra HEAD y la
+> encontró **invertida**: los riesgos 1, 2 y 3 estaban ya cerrados y seguían declarados
+> abiertos, mientras los que sí estaban abiertos no figuraban. Se reescribe entera. Las
+> entradas cerradas se conservan tachadas: perder la constancia de que algo estuvo roto es
+> perder justo lo que evita volver a romperlo.
 
-**2 · Un ámbito vacío puede aprobar, hoy, en dos sitios.** Los dos son defectos conocidos, no
-comportamiento:
+**~~1 · El vocabulario de estados no es el del contrato.~~ CERRADO.** `core/model.py`
+implementa seis: `PASS FAIL BLOCKED NOT_EXECUTABLE NOT_APPLICABLE INCONCLUSIVE`. El sexto se
+añadió el 2026-09-23 para poder decir «las dos fuentes de verdad no coinciden». Queda la
+divergencia menor de uso: varias puertas siguen diciendo `BLOCKED` donde querrían decir
+`NOT_APPLICABLE` (`gates/g_sdd.py`, `g_agent.py`, `g_fleet.py`, `g_human.py`, `g_trace.py`).
 
-- `gates/g_mcp.py`: sin servidores declarados devuelve `PASS` «nada que verificar». Hay una
-  prueba que **exige** ese `PASS` (`tests/selftest/test_gates.py::test_sin_referencias_no_aplica_y_NO_aprueba`),
-  así que arreglarlo obliga a cambiarla.
-- `tests/runner.py`: con 0 pruebas ejecutadas sale con `0`. Medido el 2026-09-21:
-  `python3 refuto.py --verbose selftest --suite zzz` → `NO TESTS RAN` y `exit=0`. Es un aprobado
-  vacuo en el propio juez.
+**~~2 · Un ámbito vacío puede aprobar en dos sitios.~~ CERRADO en los dos declarados, y había
+un tercero que no estaba.** `gates/g_mcp.py` da `NOT_APPLICABLE`; `tests/runner.py` sale con 1.
+El que faltaba era `gates/g_security.py`, que aprobaba con «0 archivos recorridos» incluso con
+una credencial `AKIA…` real bajo `node_modules/`, y `core/lock.py`, que comparaba cero huellas
+contra cero huellas. Ver el riesgo 8.
 
-**3 · Los códigos de salida colisionan.** Documentados: `0` integrable, `1` rojo, `2` bloqueado.
-El código define además `EXIT_USAGE = 64`, y **argparse sale con `2`** ante un error de uso — el
-mismo número que «bloqueado». Un error de escritura en la línea de órdenes es indistinguible de
-un veredicto, para un script que sólo mire el código.
+**~~3 · Los códigos de salida colisionan.~~ CERRADO.** Medido el 2026-09-23: todo error de uso
+sale con `64` y el bloqueo con `2`. No hay colisión.
+
+**8 · `PASS` exige cobertura, y once puertas todavía no la declaran.** `Result.scope` existe y
+`core.evidence.verdict_of` se niega a contar como aprobada una puerta que no declara qué
+observó. `core/lock.py` ya la declara. `gates/**` está protegido —el sujeto no puede editar a
+su juez— así que el cambio de `g_security.py` va **propuesto** en
+[`remediation/gates-cobertura.patch`](remediation/gates-cobertura.patch) y las otras once
+puertas están pendientes. Hasta entonces, una corrida con esas puertas no es integrable, que
+es el comportamiento honesto y también el incómodo.
+
+**9 · `I6` no es demostrable en esta frontera.** «El agente no puede escribir al juez» exige
+decidir el efecto de una orden (no computable) o una frontera de proceso que hoy no existe
+(mismo uid, mismo sistema de archivos). Se afirma `I6'` en su lugar: si el juez fue modificado,
+ningún veredicto posterior es `PASS`. Ver
+[ADR-0013](decisions/ADR-0013-raiz-de-confianza-y-modelo-de-efectos.md).
+
+**10 · Truncar la cola del diario no se detecta sin un ancla publicada.** La cadena de huellas
+ve edición, borrado y reordenación; cortar por el final deja los eslabones restantes
+consistentes. `NOT_PROVEN` mientras nadie publique la cabeza fuera del árbol.
 
 **4 · `policy unwire` no borra lo que `wire` creó.** Restaura desde `.harness/backup/`, que sólo
 contiene lo que ya existía. Un `.claude/settings.local.json` creado por `wire` sobrevive al
