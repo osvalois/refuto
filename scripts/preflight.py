@@ -143,54 +143,54 @@ def _datos_personales() -> tuple:
     return 0, f"{len(encontrados)} fichero(s) con coincidencia, todos declarados"
 
 
-#: Marcas de proveedor que, formando el nombre de una variable de CREDENCIAL, no deben aparecer
-#: en el árbol rastreado.
+#: Sufijos que hacen que un identificador tenga forma de credencial.
 #:
 #: Por qué existe este control, y es una retractación
 #: --------------------------------------------------
-#: El 2026-09-25 añadí a la lista de fábrica de `secret_env_deny` once nombres concretos de
-#: servicios y, en un comentario, el inventario de qué credenciales había en la máquina donde lo
-#: medí — **incluida una con el nombre de un cliente**. Todo eso se empujó a un repositorio
-#: PÚBLICO.
+#: Al añadir `secret_env_deny` metí en la lista de fábrica once nombres concretos de servicios y,
+#: en un comentario, el inventario de qué credenciales había en la máquina donde lo medí —
+#: **incluida una con el nombre de un cliente**. Se empujó a un repositorio PÚBLICO.
 #:
 #: No se expuso ningún valor. Se expuso el MAPA: de qué servicios hay credenciales. Para alguien
 #: hostil eso es casi tan útil, y en un producto de gobierno la asimetría es inaceptable — el
-#: control estaría publicando parte de lo que existe para proteger. `AGENTS.md` ya lo prohibía en
+#: control estaría publicando parte de lo que existe para proteger. `AGENTS.md` lo prohibía en
 #: prosa y nada lo comprobaba sobre el CÓDIGO: el control de datos personales miraba rutas y
 #: correos. Un control que depende de que quien escribe se acuerde no es un control.
 #:
-#: Por qué `<MARCA>_…_<SUFIJO>` y no «cualquier mención de una marca»
-#: ------------------------------------------------------------------
-#: La primera versión marcaba cualquier aparición de un nombre de proveedor y dio **28
-#: ficheros** — `gemini` es un runtime soportado y se nombra en todas partes, con razón. 28
-#: hallazgos sobre 0 defectos es la definición de un control que se desactiva en una semana, que
-#: es justo lo que este guion documenta en otras cuatro tablas. Afinado a «una marca formando el
-#: nombre de una variable de credencial», que es EL defecto que hubo, da **5 ficheros y uno era
-#: el mío**. Medido, no estimado.
-_MARCAS = ("AWS", "AMAZON", "AZURE", "GCP", "GOOGLE", "GITHUB", "GH", "GITLAB", "BITBUCKET",
-           "OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK", "MISTRAL", "COHERE", "HUGGINGFACE",
-           "NPM", "PYPI", "DOCKER", "STRIPE", "TWILIO", "SENDGRID", "SLACK", "NOTION",
-           "SUPABASE", "VERCEL", "NETLIFY", "CLOUDFLARE", "DATADOG", "SENTRY", "AUTH0",
-           "CLAUDE")
+#: Por qué SIN lista de marcas
+#: ---------------------------
+#: La primera versión marcaba cualquier mención de un proveedor y dio **28 ficheros**: `gemini`
+#: es un runtime soportado y se nombra en todas partes, con razón. Acotarlo a
+#: `<MARCA>_…_<SUFIJO>` bajó a 5, pero seguía necesitando una lista de marcas — que envejece en
+#: cuanto aparece un proveedor nuevo y cuya **selección delata**: incluir una marca poco conocida
+#: dice que alguien la tenía delante al escribirla.
+#:
+#: La inversión lo elimina: no se enumera ninguna marca. Se busca **cualquier** identificador con
+#: forma de credencial (`MI_SERVICIO_TOKEN`) y se exceptúan los prefijos de EJEMPLO, que son
+#: estables y no dicen nada de nadie. Medido: **4 ficheros**, tres legítimos y un falso positivo
+#: que se cierra excluyendo `DEFAULT_`, el prefijo convencional de una constante.
 _SUFIJOS_CREDENCIAL = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
                        "CREDENTIALS", "PASSPHRASE")
 
-#: Dónde SÍ es legítimo, con el motivo. Cuatro, y se cuentan.
+#: Prefijos de ejemplo. Escribir `MI_SERVICIO_API_KEY` es lo que `AGENTS.md` prescribe para todo
+#: lo demás, y esta lista es lo que lo hace practicable sin excepciones por fichero.
+_PREFIJOS_DE_EJEMPLO = ("MI_", "OTRO_", "UNA_", "UN_", "REFUTO_", "EJEMPLO_", "DEMO_",
+                        "APP_", "X_", "FOO_", "TEST_", "DEFAULT_")
+
+#: Dónde SÍ es legítimo nombrar un proveedor en una credencial, con el motivo. Tres, y se cuentan.
 #:
-#: `core/provider.py` y su prueba existen para RECONOCER la redirección de un proveedor concreto:
-#: sin nombrarlo no hay nada que reconocer. `core/digest.py` lleva las firmas de secreto por
-#: proveedor, que es lo mismo. Marcarlos obligaría a desactivar el control, y entonces no
-#: protegería de nada.
+#: `core/provider.py` y sus pruebas existen para RECONOCER la redirección de un proveedor
+#: concreto: sin nombrarlo no hay nada que reconocer. Marcarlos obligaría a desactivar el
+#: control, y entonces no protegería de nada.
 _MARCAS_PERMITIDAS = {
     "core/provider.py": "su trabajo es detectar la redirección de un proveedor concreto",
-    "core/digest.py": "lleva las firmas de secreto por proveedor, que es su función",
-    "tests/unit/test_provider.py": "prueba el detector de redirección de proveedor",
+    "tests/unit/test_provider.py": "prueba ese detector",
     "tests/unit/test_session.py": "comprueba que el informe avisa de una redirección concreta",
 }
 
 
 def _nombres_de_producto() -> tuple:
-    """Marcas de proveedor formando un nombre de credencial. `(codigo, salida)`.
+    """Identificadores con forma de credencial que nombran algo concreto. `(codigo, salida)`.
 
     Se mira sólo lo RASTREADO por git: lo ignorado no se publica, y es publicar lo que convierte
     un nombre en exposición.
@@ -205,7 +205,7 @@ def _nombres_de_producto() -> tuple:
     if p.returncode != 0:
         return 2, f"`git ls-files` salió con {p.returncode}: no se pudo comprobar"
 
-    patron = _re.compile(r"\b(" + "|".join(_MARCAS) + r")(_[A-Z0-9]+)*_("
+    patron = _re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)_("
                          + "|".join(_SUFIJOS_CREDENCIAL) + r")\b")
     hallados = {}
     for rel in (p.stdout or "").split("\0"):
@@ -215,16 +215,18 @@ def _nombres_de_producto() -> tuple:
             texto = (RAIZ / rel).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        nombres = sorted({m.group(0) for m in patron.finditer(texto)})
+        nombres = sorted({m.group(0) for m in patron.finditer(texto)
+                          if not m.group(0).startswith(_PREFIJOS_DE_EJEMPLO)})
         if nombres:
             hallados[rel] = nombres
     if hallados:
         detalle = " · ".join(f"{r} ({', '.join(n[:2])})"
                              for r, n in sorted(hallados.items())[:5])
-        return 1, (f"{len(hallados)} fichero(s) nombran un proveedor en una variable de "
-                   f"credencial: {detalle}. Use una forma inventada (`MI_SERVICIO_API_KEY`) o "
-                   f"declare el fichero en `_MARCAS_PERMITIDAS` con su motivo")
-    return 0, (f"ninguna marca en un nombre de credencial fuera de los "
+        return 1, (f"{len(hallados)} fichero(s) nombran algo concreto en una variable de "
+                   f"credencial: {detalle}. Use una forma de ejemplo "
+                   f"(`MI_SERVICIO_API_KEY`) o declare el fichero en `_MARCAS_PERMITIDAS` con "
+                   f"su motivo")
+    return 0, (f"ningún identificador de credencial nombra algo concreto fuera de los "
                f"{len(_MARCAS_PERMITIDAS)} ficheros donde es legítimo")
 
 
