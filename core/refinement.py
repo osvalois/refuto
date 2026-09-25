@@ -159,8 +159,25 @@ if _SIN_REGLA:                                                        # pragma: 
 def _canonico(doc: dict) -> str:
     """El texto del que se saca el digest. Las claves de comentario (`_que_es`, `_medido`…)
     se descartan: una nota que cambia no cambia la política, y si contara, editar un
-    comentario invalidaría la identidad de todos los proyectos que heredan."""
-    limpio = {k: v for k, v in sorted(doc.items()) if not k.startswith("_")}
+    comentario invalidaría la identidad de todos los proyectos que heredan.
+
+    Las listas de cadenas se ordenan por el mismo motivo. `protected_paths` es un CONJUNTO
+    de patrones: el orden en que se tecleó no cambia nada de lo que protege. `sort_keys`
+    sólo ordenaba las CLAVES, así que reordenar dos patrones —o que un paso intermedio los
+    normalice— cambiaba la identidad del documento sin cambiar la política, e invalidaba
+    todo `extends_digest` anclado a él. Medido el 2026-09-24: entre un documento y su
+    composición con la norma base, la ÚNICA diferencia era el orden de cinco listas.
+
+    Las listas que no son de cadenas (`network_rules`) se dejan como están: no se puede
+    afirmar que su orden no signifique nada, y ordenar por afirmación no medida es
+    justamente lo que este módulo existe para no hacer.
+    """
+    def _valor(v):
+        if isinstance(v, list) and all(isinstance(x, str) for x in v):
+            return sorted(v)
+        return v
+
+    limpio = {k: _valor(v) for k, v in sorted(doc.items()) if not k.startswith("_")}
     return json.dumps(limpio, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -217,11 +234,47 @@ def _viola(campo: str, regla: str, padre, hijo) -> list:
         # sigue haciendo falta detección es `REDUCE`, porque ahí la unión SÍ ensancharía.
         return []
     if regla == REDUCE:
-        sobran = sorted(h - p)
-        return [f"`{campo}`: el hijo añade {len(sobran)} entrada(s) que el padre no tiene: "
+        sobran = sorted(x for x in h if not any(_cubre(pp, x) for pp in p))
+        return [f"`{campo}`: el hijo añade {len(sobran)} entrada(s) que el padre no cubre: "
                 f"{', '.join(sobran[:5])}. Este campo abre agujeros en lo protegido y sólo "
                 f"puede encogerse."] if sobran else []
     return []
+
+
+def _cubre(patron_padre: str, patron_hijo: str) -> bool:
+    """¿Toda ruta que case con el patrón del hijo casa también con el del padre?
+
+    Sólo devuelve `True` cuando la inclusión se puede DEMOSTRAR. Comparar globs en general no
+    es decidible, así que ante la duda se responde `False` y el refinamiento lo trata como una
+    entrada añadida — que es el lado seguro: rechazar un estrechamiento legítimo se nota y se
+    arregla, aceptar un ensanchamiento no se nota nunca.
+
+    El defecto que esto cierra
+    --------------------------
+    La comparación era por CADENA (`h - p`), y eso confunde «añadir un agujero» con
+    «escribirlo de otra forma». `core.policy._path_matches` define `**/X` como «X en la raíz o
+    a cualquier profundidad», luego `X ⊂ **/X` es una inclusión estricta y declarar `X` cuando
+    el padre dice `**/X` es ESTRECHAR, no ensanchar.
+
+    Medido el 2026-09-24: al corregir la asimetría de `DEFAULT_WRITABLE` —de
+    `.harness/memory/**` a `**/.harness/memory/**`— toda política existente que declaraba el
+    valor anterior dejó de resolverse:
+
+        HerenciaIrresoluble: `writable_paths`: el hijo añade 1 entrada(s) que el padre no
+        tiene: .harness/memory/**
+
+    y una política que no resuelve hace que el guardián deniegue TODO. Es decir: la norma base
+    no se podía corregir sin dejar ungobernables los espacios ya instalados, porque el
+    instalador escribía justamente el valor antiguo. Un campo así no se puede mantener.
+    """
+    if patron_padre == patron_hijo:
+        return True
+    # `**/X` cubre `X`: es la misma relación que `_path_matches` aplica al comparar rutas, donde
+    # para un patrón `**/…` se prueba además sin el prefijo. La dirección importa y no es
+    # simétrica: el hijo puede pasar de `**/X` a `X` (estrecha), nunca de `X` a `**/X` (ensancha).
+    if patron_padre.startswith("**/") and patron_padre[3:] == patron_hijo:
+        return True
+    return False
 
 
 def refinar(padre_doc: dict, hijo_doc: dict, *,
@@ -291,8 +344,13 @@ def refinar(padre_doc: dict, hijo_doc: dict, *,
             efectivo[campo] = sorted(set(padre_eff.get(campo) or ()) |
                                      set(hijo_doc.get(campo) or ()))
         elif regla == REDUCE:
-            efectivo[campo] = sorted(set(padre_eff.get(campo) or ()) &
-                                     set(hijo_doc.get(campo) or ()))
+            # La lista del HIJO, no la intersección. Ya se ha demostrado arriba que cada
+            # entrada suya está cubierta por el padre, así que su lista ES el estrechamiento —y
+            # la intersección por cadena lo rompía: con el padre en `**/X` y el hijo en `X`, la
+            # intersección daba el conjunto VACÍO, dejando al espacio sin ninguna excepción en
+            # vez de con la que declaró. Para toda política que ya cumplía (hijo ⊆ padre por
+            # igualdad) las dos formas coinciden, así que esto no cambia ningún efectivo previo.
+            efectivo[campo] = sorted(set(hijo_doc.get(campo) or ()))
         elif regla == MODO:
             # El del padre como base: un runtime que el hijo no menciona conserva el suyo.
             efectivo[campo] = {**(padre_eff.get(campo) or {}), **(hijo_doc[campo] or {})}
@@ -376,13 +434,49 @@ def politica_efectiva(ruta: Path, doc: dict) -> Policy:
         except (OSError, ValueError) as exc:
             raise HerenciaIrresoluble(
                 f"el padre «{ref}» existe y no se pudo leer ({type(exc).__name__}: {exc}). "
-                f"No poder leerlo no es no tenerlo: no se puede afirmar cuál es la política.")
+                f"No poder leerlo no es no tenerlo: no se puede afirmar cuál es la política."
+            ) from exc
         actual_ruta, actual_doc = padre_ruta.resolve(), padre_doc
 
     # De ancestro a hijo, refinando de dos en dos. El ancestro manda sobre todos.
     cadena.reverse()
-    _, efectivo_doc = cadena[0]
-    ident = identidad_de(efectivo_doc)
+
+    # …y sobre el ancestro manda la RAÍZ DEL MOTOR. Sin esto, la monotonía era relativa: se
+    # demostraba `hijo ⊒ padre` en cada arista y nadie exigía que la CIMA atenuara nada, así
+    # que bastaba con apuntar `extends` a una política laxa —escrita en cualquier sitio que
+    # el espacio declare suyo— para vaciar el gobierno entero sin violar una sola arista.
+    # Medido el 2026-09-23: tres comprobaciones pasaron de `deny` a `allow`.
+    #
+    # Componer y no sólo validar: en los campos que acumulan, el efectivo es la unión con la
+    # norma base, y entonces vaciarlos no es una violación que haya que cazar — es algo que
+    # no se puede escribir. Ver `core/trust.py`.
+    from core.trust import componer_con_raiz
+
+    ruta_cima, doc_cima = cadena[0]
+    r_raiz = componer_con_raiz(doc_cima)
+    if r_raiz.status != PASS:
+        raise HerenciaIrresoluble(
+            f"la cima de la cadena «{ruta_cima.name}» no atenúa la norma base de refuto: "
+            f"{r_raiz.motivo} {' | '.join(r_raiz.violaciones)}")
+    efectivo_doc = {**doc_cima, **{k: v for k, v in r_raiz.politica.to_dict().items()
+                                   if k in REGLAS}}
+    # La identidad de la cima es la de su documento DECLARADO, encadenada a la raíz del
+    # motor. NO la del documento ya compuesto.
+    #
+    # Antes se digería `efectivo_doc`, y eso hacía que `digest` significara dos cosas según
+    # la profundidad: en la cima, el documento compuesto; de ahí hacia abajo, `refinar`
+    # devuelve `identidad_de(hijo_doc)`, que es el declarado. `documento_hijo` escribe el
+    # ancla siempre con el declarado (`digest_de(padre_doc)`), así que un `extends_digest`
+    # sobre una cima NO PODÍA coincidir nunca y `--anchor` quedaba roto para todo espacio
+    # anclado, con un motivo que además mentía: decía «el padre cambió» sobre un padre
+    # intacto. Medido el 2026-09-24 en un espacio real: ancla `41164aa7…`, comprobación
+    # `7738a16e…`, fichero del padre sin tocar desde antes de escribirse el ancla.
+    #
+    # `efectivo` sigue encadenando —ahora también a la raíz—, que es donde vive «esta
+    # política significa otra cosa que ayer». `digest` es quién declara ser.
+    from core.trust import documento_raiz
+
+    ident = identidad_de(doc_cima, padre=identidad_de(documento_raiz()))
     for ruta_hijo, hijo_doc in cadena[1:]:
         esperado = str(hijo_doc.get("extends_digest") or "")
         if esperado and esperado != ident.digest:

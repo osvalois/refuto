@@ -41,25 +41,54 @@ class TestProteccionDeRutas(unittest.TestCase):
 
     # ── negativos: uno por cosa que hay que proteger ─────────────────────────────────
     def test_protege_el_juez(self):
-        self.deny("verificacion/v1_tokens.py", rule="verificacion/**")
-        self.deny("verification/gate.py", rule="verification/**")
-        self.deny("gates/g_agent.py", rule="gates/**")
+        self.deny("verificacion/v1_tokens.py", rule="**/verificacion/**")
+        self.deny("verification/gate.py", rule="**/verification/**")
+        self.deny("gates/g_agent.py", rule="**/gates/**")
 
     def test_protege_steering(self):
         """`str.lstrip('./')` quita CARACTERES, no un prefijo: `.kiro/...` se convertía en
         `kiro/...` y el estándar quedaba desprotegido por un punto. Esta prueba lo fija."""
-        self.deny(".kiro/steering/metodo.md", rule=".kiro/steering/**")
-        self.deny("./.kiro/steering/diseno.md", rule=".kiro/steering/**")
+        self.deny(".kiro/steering/metodo.md", rule="**/.kiro/steering/**")
+        self.deny("./.kiro/steering/diseno.md", rule="**/.kiro/steering/**")
 
     def test_protege_la_evidencia_y_los_insumos(self):
-        self.deny("evidencia/informe.json", rule="evidencia/**")
-        self.deny("evidence/run.json", rule="evidence/**")
-        self.deny("insumos/02-historias/HU-01.md", rule="insumos/**")
+        self.deny("evidencia/informe.json", rule="**/evidencia/**")
+        self.deny("evidence/run.json", rule="**/evidence/**")
+        self.deny("insumos/02-historias/HU-01.md", rule="**/insumos/**")
 
     def test_protege_los_locks_y_la_propia_politica(self):
         self.deny(".nucleo.lock.json")
         self.deny("harness.lock.json")
-        self.deny(".harness/policy.json", rule=".harness/**")
+        self.deny(".harness/policy.json", rule="**/.harness/**")
+
+    def test_protege_A_CUALQUIER_PROFUNDIDAD_no_solo_en_la_raiz(self):
+        """Un espacio multi-repo tiene un `.harness/` por hijo, y también hay que protegerlos.
+
+        Medido el 2026-09-24 en un espacio real cuya raíz no es repositorio y cuyos dos hijos
+        sí: con los patrones anclados a la raíz, desde arriba se podía reescribir el guardián,
+        la política y la evidencia de cada hijo. Ninguna prueba lo cubría porque todas
+        escribían rutas de primer nivel.
+        """
+        for hijo in ("repo-hijo", "a/b/repo-nieto"):
+            self.deny(f"{hijo}/.harness/bin/guard", rule="**/.harness/**")
+            self.deny(f"{hijo}/.harness/policy.json", rule="**/.harness/**")
+            self.deny(f"{hijo}/evidence/run.json", rule="**/evidence/**")
+            self.deny(f"{hijo}/gates/g.py", rule="**/gates/**")
+            self.deny(f"{hijo}/harness.manifest.json", rule="**/harness.manifest.json")
+            self.deny(f"{hijo}/algo.lock.json", rule="**/*.lock.json")
+            self.deny(f"{hijo}/.kiro/steering/m.md", rule="**/.kiro/steering/**")
+
+    def test_la_memoria_del_agente_es_escribible_a_cualquier_profundidad(self):
+        """La contraparte, y sin ella lo de arriba se satisface denegando todo.
+
+        `protected_paths` ACUMULA y `writable_paths` REDUCE, así que una protección que cubra
+        más profundidad que su excepción deja al espacio con una denegación colateral que NO
+        puede arreglar: intentar añadir la excepción levanta `HerenciaIrresoluble`. Las dos
+        listas tienen que moverse juntas.
+        """
+        self.allow(".harness/memory/nota.md")
+        self.allow("repo-hijo/.harness/memory/nota.md")
+        self.allow("a/b/repo-nieto/.harness/memory/nota.md")
 
     def test_bloquea_travesia_de_directorios(self):
         self.deny("../../../etc/passwd", rule="fuera-del-espacio")
@@ -67,8 +96,8 @@ class TestProteccionDeRutas(unittest.TestCase):
 
     def test_normaliza_antes_de_comparar(self):
         """`a/../b` tiene que compararse como `b`. Sin normalizar, el patrón se sortea."""
-        self.deny("verificacion/../verificacion/v3.py", rule="verificacion/**")
-        self.deny("app/../verificacion/comun.py", rule="verificacion/**")
+        self.deny("verificacion/../verificacion/v3.py", rule="**/verificacion/**")
+        self.deny("app/../verificacion/comun.py", rule="**/verificacion/**")
 
     def test_bloquea_secretos_en_el_contenido(self):
         """Lo que tiene FORMA de credencial se rechaza sin preguntar."""
@@ -173,14 +202,51 @@ class TestPoliticaIlegible(unittest.TestCase):
         self.assertEqual(Policy.default().to_dict()["command_deny"],
                          Policy.from_dict({}).to_dict()["command_deny"])
 
-    def test_los_metadatos_NO_cuentan_como_politica(self):
-        """`schema` y `version` los lleva cualquier documento, incluido el de otro programa.
+    def test_los_metadatos_SOLOS_no_cuentan_como_politica(self):
+        """`version` sin más lo lleva cualquier documento, incluido el de otro programa.
 
-        Contarlos como campo reconocido salvaba justo al documento que esto caza.
+        Lo que decide no es «cuántos campos reconozco» sino «puedo demostrar que este documento
+        es MÍO». El esquema es la única clave que lo demuestra; los demás metadatos, no.
+        """
+        from core.policy import PoliticaIlegible
+        for doc in ({"version": 1}, {"name": "x", "version": 1},
+                    {"schema": "otro-programa/v3", "version": 1}):
+            with self.subTest(doc=doc), self.assertRaises(PoliticaIlegible):
+                Policy.from_dict(doc)
+
+    def test_nuestro_esquema_sin_mas_campos_ES_una_politica_minima(self):
+        """Corrige una incoherencia medida el 2026-09-24: `{}` valía y `{schema}` no.
+
+        `test_un_documento_vacio_SI_es_valido` fija que `{}` significa «acepto la norma base».
+        Añadirle NUESTRO propio identificador de contrato no puede convertirlo en ilegible — y
+        lo hacía: la forma mínima y natural de una política de proyecto,
+
+            {"schema": "harness.policy/v1", "name": "mi-espacio", "version": "1"}
+
+        levantaba `PoliticaIlegible` hablando de «la política de OTRO programa» y enumerando
+        cero campos ajenos. El guardián entonces deniega TODO, así que el espacio quedaba
+        inoperante por declararse correctamente.
+
+        Y el efectivo no es laxo, es lo contrario: son los valores de fábrica, que son la norma
+        más estricta que refuto sabe aplicar.
+        """
+        p = Policy.from_dict({"schema": "harness.policy/v1", "name": "mi-espacio",
+                              "version": "1"})
+        self.assertEqual(Policy.default().to_dict()["command_deny"],
+                         p.to_dict()["command_deny"])
+        self.assertTrue(p.is_protected(".harness/policy.json"))
+
+    def test_nuestro_esquema_CON_claves_ajenas_sigue_siendo_ilegible(self):
+        """Lo que el control existe para cazar, y la excepción de arriba no lo suelta.
+
+        El caso real era un `.harness/policy.json` escrito por OTRO programa que reclama la
+        misma ruta, con nueve secciones de otro contrato. Con una sola clave ajena presente la
+        excepción no aplica, lleve el esquema que lleve.
         """
         from core.policy import PoliticaIlegible
         with self.assertRaises(PoliticaIlegible):
-            Policy.from_dict({"schema": "harness.policy/v1", "version": 1})
+            Policy.from_dict({"schema": "harness.policy/v1", "version": 1,
+                              "client_identifiers": ["x"], "pii_patterns": ["y"]})
 
     def test_un_documento_parcial_sigue_siendo_valido(self):
         """Tolerar campos que faltan es correcto; tolerar que no se entienda ninguno, no."""

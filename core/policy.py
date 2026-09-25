@@ -35,6 +35,10 @@ from pathlib import Path
 
 POLICY_SCHEMA = "harness.policy/v1"
 
+#: El estado con el que `core.refinement.refinar` declara éxito. Se importa por nombre
+#: propio para no arrastrar `core.model` entero a este módulo, del que depende el guardián.
+PASS_REFINAMIENTO = "PASS"
+
 #: Lo que un agente no puede escribir nunca, porque es lo que lo juzga o lo que prueba lo que
 #: hizo. Un agente que puede editar su propia verificación no está pasando la verificación:
 #: está moviendo la puerta.
@@ -46,14 +50,28 @@ POLICY_SCHEMA = "harness.policy/v1"
 #: cubre cualquier lock, incluido aquél. Los nombres en español (`verificacion/`, `evidencia/`,
 #: `insumos/`) se quedan porque son la palabra común, no el nombre de nadie; un espacio con
 #: otra nomenclatura la declara en su `.harness/policy.json`, que se fusiona con ésta.
+#:
+#: Todas llevan el prefijo `**/`, y eso no es cosmético: sin él sólo cubrían la RAÍZ. Medido el
+#: 2026-09-24 en un espacio multi-repo real, donde la raíz no es repositorio y cada hijo trae su
+#: propio `.harness/`:
+#:
+#:     Write  .harness/bin/guard                     →  deny   («.harness/**»)
+#:     Write  repo-hijo/.harness/bin/guard           →  ALLOW  ← el guardián del hijo, reescribible
+#:
+#: Es decir: desde la raíz se podía reescribir el guardián, la política y la evidencia de cada
+#: repositorio hijo. El dueño de ese espacio lo detectó y añadió los `**/` a mano en su política;
+#: que un espacio tenga que parchear la norma base para no tener un agujero significa que el
+#: agujero era de la norma base. `**/x/**` cubre la raíz Y cualquier profundidad —lo garantiza
+#: `_path_matches`, que para un patrón `**/…` prueba también sin el prefijo—, así que esto no
+#: añade patrones: corrige el alcance de los que ya había.
 DEFAULT_PROTECTED = (
-    "verification/**", "verificacion/**",
-    ".kiro/steering/**", ".harness/**",
-    "inputs/**", "insumos/**",
-    "evidence/**", "evidencia/**",
-    "gates/**", "policies/**",
-    "*.lock.json",
-    "harness.manifest.json", "harness.lock.json",
+    "**/verification/**", "**/verificacion/**",
+    "**/.kiro/steering/**", "**/.harness/**",
+    "**/inputs/**", "**/insumos/**",
+    "**/evidence/**", "**/evidencia/**",
+    "**/gates/**", "**/policies/**",
+    "**/*.lock.json",
+    "**/harness.manifest.json", "**/harness.lock.json",
 )
 
 #: Excepciones DENTRO de lo protegido. Se comprueban ANTES que `protected_paths`.
@@ -64,8 +82,22 @@ DEFAULT_PROTECTED = (
 #: política protege una y no la otra». No lo hacía: el mismo patrón cubría las dos, así que el
 #: agente no podía recordar nada. Medido en un espacio real: `.harness/memory/` **no
 #: existe** después de una semana de uso, porque toda escritura que lo habría creado se rechazó.
+#:
+#: Lleva `**/` por SIMETRÍA con `DEFAULT_PROTECTED`, y la simetría aquí es obligatoria, no
+#: estética. `protected_paths` ACUMULA y `writable_paths` REDUCE (`core.refinement.REGLAS`): un
+#: espacio puede añadir protección pero NO puede añadir la excepción que la acompaña —intentarlo
+#: levanta `HerenciaIrresoluble` y el guardián deniega TODO—. Así que cada protección que cubra
+#: más profundidad que su excepción produce una denegación colateral **irreparable desde el
+#: espacio**. Medido el 2026-09-24, con `**/.harness/**` protegido y `.harness/memory/**`
+#: exento:
+#:
+#:     Write  .harness/memory/nota.md            →  allow
+#:     Write  repo-hijo/.harness/memory/nota.md  →  DENY  («**/.harness/**»)
+#:
+#: es decir: los repositorios hijos quedaban sin memoria, y su dueño no tenía forma legítima de
+#: arreglarlo. La asimetría se corrige en la raíz porque es donde nació.
 DEFAULT_WRITABLE = (
-    ".harness/memory/**",
+    "**/.harness/memory/**",
 )
 
 #: Raíces FUERA del espacio donde escribir SÍ es legítimo, declaradas una a una.
@@ -186,8 +218,18 @@ class Policy:
             if fnmatch.fnmatch(target, pat):
                 return pattern
             # `raiz/**` cubre además la raíz misma, que `fnmatch` no da por incluida.
-            if pat.endswith("/**") and (target == pat[:-3] or target.startswith(pat[:-3] + "/")):
-                return pattern
+            #
+            # La comparación literal no bastaba cuando la raíz lleva comodín. Con
+            # `/tmp/claude-*/**` el prefijo es `/tmp/claude-*`, y `target == prefijo` no casa
+            # nunca contra `/tmp/claude-abc`: el patrón se quedaba cubriendo el CONTENIDO del
+            # cuaderno del agente y no el cuaderno. Sin analizar efectos de órdenes el defecto
+            # era invisible —`mkdir` no se miraba—; con `core.effects` mirando, `mkdir` sobre
+            # la raíz declarada empezó a denegarse. Se compara también por patrón.
+            if pat.endswith("/**"):
+                raiz = pat[:-3]
+                if fnmatch.fnmatch(target, raiz) or target == raiz \
+                        or target.startswith(raiz + "/"):
+                    return pattern
         return ""
 
     def is_secret_path(self, rel_path: str) -> str:
@@ -248,6 +290,23 @@ class Policy:
         sustantivas = set(kwargs) - {"schema", "version"}
         if doc.get("extends"):
             sustantivas.add("extends")
+        # Un documento que declara NUESTRO esquema y nada que no reconozcamos es nuestro, y si
+        # no declara más es porque acepta la norma base entera — exactamente lo que significa
+        # `{}`, que este mismo método considera válido. Rechazarlo era un defecto medido el
+        # 2026-09-24: `{"schema": "harness.policy/v1", "name": "x", "version": "1"}` —la forma
+        # mínima y natural de decir «acepto lo que venga»— no cargaba, y el guardián denegaba
+        # todo con el motivo equivocado, hablando de «la política de OTRO programa» y
+        # enumerando cero campos ajenos.
+        #
+        # No reabre lo que este control cierra. El caso real que lo motivó era un fichero con
+        # nueve secciones de otro contrato (`client_identifiers`, `pii_patterns`…), y ésas SÍ
+        # son claves ajenas: con una sola presente la excepción no aplica y se sigue levantando.
+        # Lo que se exige es lo que se puede demostrar: esquema nuestro Y nada extraño.
+        ajenas_presentes = [k for k in doc if not k.startswith("_") and k not in
+                            ("schema", "version", "name", "extends", "extends_digest")
+                            and k not in cls.__dataclass_fields__]   # noqa: SLF001
+        if doc.get("schema") == POLICY_SCHEMA and not ajenas_presentes:
+            return cls(**kwargs)
         if doc and not sustantivas:
             ajenas = sorted(k for k in doc if not k.startswith("_") and k not in
                             ("schema", "version", "name", "extends_digest"))
@@ -289,7 +348,21 @@ class Policy:
         """
         doc = json.loads(path.read_text(encoding="utf-8"))
         if not doc.get("extends"):
-            pol = cls.from_dict(doc)
+            # Sin `extends` la cima de la cadena es este documento, y hasta el 2026-09-23
+            # nadie vigilaba lo que la cima retiraba: un `.harness/policy.json` con
+            # `protected_paths: []` dejaba el espacio sin protecciones y la herramienta no
+            # tenía nada que objetar. Ahora TODA política se compone con la raíz del motor,
+            # que es su padre implícito. En los campos que acumulan, vaciar deja de ser una
+            # violación detectable para volverse INEXPRESABLE: el efectivo es la unión.
+            # Ver `core/trust.py` y FORMAL-MODEL §3.2.
+            from core.trust import componer_con_raiz
+
+            r = componer_con_raiz(doc)
+            if r.status != PASS_REFINAMIENTO:
+                raise HerenciaIrresoluble(
+                    f"«{path.name}» no atenúa la norma base de refuto: {r.motivo} "
+                    f"{' | '.join(r.violaciones)}")
+            pol = r.politica
             # También sin herencia lleva identidad: si sólo la llevaran las heredadas, la
             # evidencia podría citar la política en unos espacios y no en otros, y «no hay
             # digest» sería indistinguible de «no se pudo calcular».
@@ -367,10 +440,53 @@ class Decision:
     outcome: str
     reason: str = ""
     rule: str = ""
+    #: `True` cuando la orden invoca algo cuyo efecto no se deriva de sus argumentos
+    #: (`python3 -c`, `make`, un binario propio). NO significa «peligrosa»: significa que
+    #: `Ê` no pudo demostrar qué toca. Viaja hasta el diario para que la atestación de
+    #: `core.trust` sepa que hubo una ventana sin demostrar. Ver FORMAL-MODEL §6.
+    opaco: bool = False
+    motivo_opaco: str = ""
+    #: Las escrituras que `Ê` SÍ demostró, para poder auditarlas después.
+    escrituras: tuple = ()
 
     @property
     def blocked(self) -> bool:
         return self.outcome == DENY
+
+
+def _motivo_protegida(rel: str, pattern: str, existe: bool) -> str:
+    """Por qué se deniega, y son DOS cosas distintas que se respondían con un solo mensaje.
+
+    Modificar el juez y colisionar con su NOMBRE no son el mismo acto. El mensaje único decía
+    «un agente que edita lo que lo evalúa está moviendo la puerta» — verdad cuando el fichero
+    existe y el agente lo reescribe; acusación falsa y, peor, consejo inútil cuando el agente
+    está creando un fichero nuevo que sólo cae dentro de un nombre reservado.
+
+    De lo segundo hay caso medido, el 2026-09-24. Un espacio cuyo ENTREGABLE era un dossier de
+    auditoría llamado `evidence/` —la misma palabra que refuto reserva para el diario que lo
+    juzga, contrato opuesto— produjo esto: el agente leyó en su informe de sesión que
+    `**/evidence/**` estaba protegido y que `/tmp/claude-*/**` era escribible, y se llevó el
+    trabajo a `/tmp`. 9,2 GB, 6 dossiers, 197 ficheros, fuera de git y en un directorio que
+    `/usr/libexec/tmp_cleaner` borra a los 3 días. Nunca intentó escribir dentro del espacio:
+    no hubo ninguna denegación que lo empujara, sólo un nombre reservado y ninguna indicación
+    de que renombrar era la salida. El espacio estaba escribible en todo lo demás.
+
+    Un control que deniega sin nombrar la alternativa no protege: desvía. Y adonde desvía no lo
+    elige quien escribió la regla.
+    """
+    if existe:
+        return (f"«{rel}» está protegida por «{pattern}». Es el estándar, el juez, el insumo "
+                f"del cliente o la evidencia. Un agente que edita lo que lo evalúa no está "
+                f"aprobando: está moviendo la puerta. El cambio se propone, no se aplica.")
+    reservado = pattern.removeprefix("**/").split("/", 1)[0].rstrip("*").rstrip("/")
+    return (f"«{rel}» no existe todavía, así que esto no es editar el juez: es CREAR algo "
+            f"dentro de un nombre reservado. «{reservado or pattern}» le pertenece a lo que "
+            f"evalúa tu trabajo —la evidencia, las puertas, la política, el insumo del "
+            f"cliente—, y el nombre está reservado incluso donde aún no hay nada, para que "
+            f"nadie lo ocupe. Si esto es producto TUYO, no hay que abrir la regla: hay que "
+            f"cambiarle el nombre al destino. Escríbelo en un directorio que no esté "
+            f"reservado —`dossier/`, `auditorias/`, `informes/`— y se permite sin tocar la "
+            f"política. No lo saques a `/tmp`: ahí no está en git y el sistema lo borra.")
 
 
 def decide_write(policy: Policy, workspace: Path, target: str, content: str = "") -> Decision:
@@ -409,10 +525,7 @@ def decide_write(policy: Policy, workspace: Path, target: str, content: str = ""
         pattern = policy.is_protected(rel)
         if pattern:
             return Decision(DENY, rule=pattern,
-                            reason=f"«{rel}» está protegida por «{pattern}». Es el estándar, el "
-                                   f"juez, el insumo del cliente o la evidencia. Un agente que "
-                                   f"edita lo que lo evalúa no está aprobando: está moviendo la "
-                                   f"puerta. El cambio se propone, no se aplica.")
+                            reason=_motivo_protegida(rel, pattern, resolved.exists()))
 
     secret_pat = policy.is_secret_path(rel)
     if secret_pat:
@@ -533,6 +646,106 @@ def _sin_literales(command: str) -> str:
     return "".join(out)
 
 
+#: El operador de documento aquí y su delimitador. Tres formas, y la diferencia entre ellas es
+#: justo lo que decide si el cuerpo se ejecuta: `<<'EOF'` y `<<"EOF"` lo dejan literal, `<<EOF`
+#: lo expande.
+_HEREDOC = re.compile(r"<<-?[ \t]*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _dentro_de_comillas(linea: str) -> list:
+    """Por cada posición, si está dentro de comillas. Para no leer texto citado como sintaxis."""
+    dentro, simple, doble = [], False, False
+    i, n = 0, len(linea)
+    while i < n:
+        c = linea[i]
+        if c == "\\" and i + 1 < n:
+            dentro += [simple or doble, simple or doble]
+            i += 2
+            continue
+        if c == "'" and not doble:
+            simple = not simple
+        elif c == '"' and not simple:
+            doble = not doble
+        dentro.append(simple or doble)
+        i += 1
+    return dentro
+
+
+def _sin_cuerpos_citados(command: str) -> str:
+    """La orden sin los cuerpos de documento aquí que el shell NO expande.
+
+    El defecto que esto cierra
+    --------------------------
+    `_segmentos` extrae órdenes de `$(…)` y de acentos invertidos, y `_partir` corta por saltos
+    de línea. Las dos cosas son correctas para shell — y el cuerpo de un documento aquí citado
+    **no es shell**: es texto. Con `<<'EOF'` el shell no expande NADA, ni sustituciones ni
+    acentos invertidos; es literal por definición.
+
+    La consecuencia, medida el 2026-09-24 contra el guardián real, con un agente que documentaba
+    en markdown la frontera de lo que NO había ejecutado:
+
+        cat > 00_AUTHORIZATION.md <<'EOF'
+        ## NO ejecutado (fuera de la frontera)
+        `adb root`, fastboot, flashing, `dd`, escritura de particiones…
+        EOF
+                                    →  deny  («dd:*»)
+
+    Cada `` `orden` `` de la prosa se convertía en un segmento ejecutable. Se midió también con
+    `` `sudo` `` (deny «sudo:*») y con `` `rm -rf /` ``, que además salía como
+    «fuera-del-espacio» porque el modelo de efectos leía el `/` del texto como un destino real.
+    Y no es una hipótesis de laboratorio: **esta función no se pudo medir en su primera versión
+    porque la orden que la medía contenía el texto que disparaba la regla**, igual que ya le
+    pasó a `_partir` con las comillas —lo cuenta su propio docstring—. Aquello se arregló sólo
+    para comillas en línea; el documento aquí, cuya cita es el delimitador y no una comilla,
+    quedó fuera.
+
+    Un control que salta con el TEXTO y no con la ACCIÓN se rodea, y aquí el rodeo medido fue
+    dejar de usar el shell para escribir ficheros. Entonces deja de mirar el canal entero.
+
+    Lo que NO se toca
+    -----------------
+    - `<<EOF` **sin citar** sí expande: su cuerpo se conserva y se sigue analizando.
+    - La línea del operador se conserva siempre, así que la redirección (`cat > destino`) sigue
+      viéndose y `core.effects` sigue derivando la escritura. Esto es lo que impide que el
+      arreglo se convierta en una vía de escape: el cuerpo deja de leerse como órdenes, pero el
+      fichero que se escribe se sigue juzgando.
+    - Sin línea terminadora no hay documento aquí (el shell fallaría), así que no se descarta
+      nada: una coincidencia falsa del operador no puede tragarse las órdenes que vengan detrás.
+    """
+    if "<<" not in command:
+        return command
+    lineas = command.split("\n")
+    salida: list = []
+    i = 0
+    while i < len(lineas):
+        linea = lineas[i]
+        salida.append(linea)
+        i += 1
+        mascara = _dentro_de_comillas(linea)
+        pendientes = []
+        for m in _HEREDOC.finditer(linea):
+            if m.start() < len(mascara) and mascara[m.start()]:
+                continue            # el operador venía dentro de comillas: es texto
+            delim = m.group(1) if m.group(1) is not None else \
+                m.group(2) if m.group(2) is not None else m.group(3)
+            pendientes.append((delim, m.group(3) is None, m.group(0).startswith("<<-")))
+        for delim, literal, sangria in pendientes:
+            cuerpo, j, cerrado = [], i, False
+            while j < len(lineas):
+                cierre = lineas[j].lstrip("\t") if sangria else lineas[j]
+                if cierre == delim:
+                    cerrado = True
+                    break
+                cuerpo.append(lineas[j])
+                j += 1
+            if not cerrado:
+                break               # sin terminador no es un documento aquí: no se traga nada
+            if not literal:
+                salida += cuerpo    # `<<EOF` sin citar SÍ expande: se sigue mirando
+            i = j + 1
+    return "\n".join(salida)
+
+
 def _segmentos(command: str) -> list:
     """Cada orden que esta cadena va a ejecutar, no sólo la primera.
 
@@ -546,6 +759,10 @@ def _segmentos(command: str) -> list:
     resbalón, no una caja de arena contra un adversario. Lo que sí cubre es lo que de verdad
     pasa a diario: encadenar, envolver, sustituir e interpretar.
     """
+    # El cuerpo de un documento aquí citado es TEXTO, no órdenes. Se descarta antes de partir:
+    # después ya es indistinguible de una cadena de órdenes separadas por saltos de línea.
+    # Ver `_sin_cuerpos_citados`, que explica el defecto que esto cierra.
+    command = _sin_cuerpos_citados(command)
     # Dos vistas: la sentencia con sus tuberías intactas, y cada orden suelta dentro de ella.
     sentencias = _partir(command, tuberia=False)
     pendientes = list(sentencias)
@@ -584,29 +801,57 @@ def _segmentos(command: str) -> list:
     return out
 
 
-def decide_command(policy: Policy, command: str) -> Decision:
+def decide_command(policy: Policy, command: str, workspace: Path | None = None) -> Decision:
     """Decide si una orden de consola se ejecuta, se pregunta o se rechaza.
 
-    Se evalúan TODOS los segmentos de la cadena y gana el más restrictivo: un rechazo en
-    cualquier posición rechaza la llamada entera, porque la herramienta ejecuta la cadena
-    entera.
+    Dos comprobaciones, y la primera es la que faltaba
+    ---------------------------------------------------
+    1. **Efectos.** `Ê(orden)` (`core.effects`) da las escrituras que se pueden DEMOSTRAR
+       desde la sintaxis. Cada una pasa por la MISMA regla de rutas protegidas que aplica
+       `decide_write`. Sin esto, la política de rutas no cubría el canal de órdenes:
+       `Write gates/base.py` daba `deny` y `Bash echo x > gates/base.py` daba `allow`
+       sobre la misma ruta y la misma política (medido el 2026-09-23).
+    2. **Patrones de orden.** Las listas `command_deny`/`command_ask` de siempre, sobre
+       todos los segmentos de la cadena. Gana el más restrictivo: un rechazo en cualquier
+       posición rechaza la llamada entera, porque la herramienta ejecuta la cadena entera.
+
+    Lo que esto NO es. `Ê ⊆ Effects` por construcción — el efecto exacto de una orden no es
+    computable (FORMAL-MODEL §6.1). Una orden opaca se marca `opaco=True` y se deja pasar:
+    denegar todo `python3` haría inusable la herramienta, y un control inusable se desactiva.
+    La garantía del producto descansa en `I6'` —si el juez fue modificado, ningún veredicto
+    posterior es PASS—, no en esta función.
     """
+    from core.effects import efectos
+
+    ef = efectos(command)
+    for destino in sorted(ef.escrituras):
+        d = decide_write(policy, workspace or Path.cwd(), destino)
+        if d.outcome == DENY:
+            return Decision(DENY, rule=d.rule,
+                            reason=f"la orden escribe en «{destino}», y {d.reason}",
+                            opaco=ef.opaco, motivo_opaco=ef.motivo_opaco,
+                            escrituras=tuple(sorted(ef.escrituras)))
+
     segmentos = _segmentos(command) or [" ".join(command.split())]
+    marca = {"opaco": ef.opaco, "motivo_opaco": ef.motivo_opaco,
+             "escrituras": tuple(sorted(ef.escrituras))}
     peor_ask = None
     for cmd in segmentos:
         for pattern in policy.command_deny:
             if _matches_command(cmd, pattern):
                 return Decision(DENY, rule=pattern,
                                 reason=f"la orden coincide con la regla de rechazo «{pattern}»"
-                                       f" (en «{cmd[:60]}»).")
+                                       f" (en «{cmd[:60]}»).", **marca)
         if peor_ask is None:
             for pattern in policy.command_ask:
                 if _matches_command(cmd, pattern):
                     peor_ask = Decision(ASK, rule=pattern,
                                         reason=f"«{pattern}» sale del repositorio o cambia algo "
-                                               f"remoto: lo decide una persona.")
+                                               f"remoto: lo decide una persona.", **marca)
                     break
-    return peor_ask or Decision(ALLOW)
+    if peor_ask:
+        return peor_ask
+    return Decision(ALLOW, **marca)
 
 
 _GLOB_CHARS = re.compile(r"[*?\[]")

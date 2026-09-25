@@ -110,13 +110,34 @@ def normalize(runtime: str, payload: dict) -> dict:
 
 
 def evaluate(policy: Policy, workspace: Path, fact: dict):
-    """Aplica la política al hecho normalizado. Una escritura, una orden, o nada que decidir."""
-    if fact["command"]:
-        return decide_command(policy, fact["command"]), "command"
-    if fact["path"]:
-        return decide_write(policy, workspace, fact["path"], fact["content"]), "write"
+    """Aplica la política al hecho normalizado.
+
+    Las dos dimensiones se evalúan, no una U otra
+    ----------------------------------------------
+    Esto era `if command: … return` / `if path: … return`, dos ramas excluyentes. La
+    consecuencia, medida el 2026-09-23 contra el guardián real con la misma política:
+
+        Write  gates/base.py           →  deny   («gates/**»)
+        Bash   echo x > gates/base.py  →  allow  ← `protected_paths` no se consultaba
+
+    Una carga puede traer las dos cosas, y aunque no las traiga, una ORDEN tiene efectos
+    sobre RUTAS. `decide_command` ya resuelve los efectos (`core.effects`); aquí sólo hay
+    que dejar de cortar el flujo antes de tiempo y quedarse con la decisión más restrictiva.
+    """
     from core.policy import Decision
-    return Decision(ALLOW, reason="la carga del gancho no trae ruta ni orden que evaluar"), "none"
+
+    decisiones = []
+    if fact["command"]:
+        decisiones.append((decide_command(policy, fact["command"], workspace), "command"))
+    if fact["path"]:
+        decisiones.append((decide_write(policy, workspace, fact["path"], fact["content"]),
+                           "write"))
+    if not decisiones:
+        return Decision(ALLOW,
+                        reason="la carga del gancho no trae ruta ni orden que evaluar"), "none"
+    # Gana la más restrictiva: la herramienta ejecuta TODO lo que la carga declara.
+    peor, kind = max(decisiones, key=lambda d: _ORDEN_DECISION[d[0].outcome])
+    return peor, kind
 
 
 def _digest_de(policy) -> str:
@@ -163,6 +184,13 @@ def _emit_event(workspace: Path, fact: dict, decision, kind: str,
             # Vacío significa «no se pudo determinar», no «no hay»: las dos cosas se
             # distinguen porque la segunda no existe — toda política cargada lleva identidad.
             "policy_digest": digest,
+            # Qué se pudo DEMOSTRAR del efecto de la orden, y qué no. Una orden opaca no
+            # se deniega —denegar todo `python3` haría inusable la herramienta— pero deja
+            # constancia de que hubo una ventana sin demostrar. Es lo que permite que la
+            # atestación de `core.trust` distinga «el juez cambió y sé por qué» de «el juez
+            # cambió y nadie declaró poder hacerlo». Ver FORMAL-MODEL §6.3.
+            "opaco": bool(getattr(decision, "opaco", False)),
+            "escrituras_probadas": list(getattr(decision, "escrituras", ()) or ()),
         })
     except Exception as exc:                                            # noqa: BLE001
         aviso = (f"AUDITORÍA INTERRUMPIDA: esta decisión no se pudo registrar en "

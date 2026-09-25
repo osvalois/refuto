@@ -74,14 +74,39 @@ class TestGatePolicy(GateCase):
         """Si el guardián deja pasar una escritura sobre la propia política, la puerta falla.
 
         Es H-03 exactamente: la política existía y NO estaba enganchada en la ruta que se usa.
-        Se simula vaciando `protected_paths`, que es lo que haría un guardián mal configurado."""
+
+        Reescrita el 2026-09-23. La simulación anterior vaciaba `protected_paths` en el
+        documento, y eso **ya no se puede escribir**: toda política se compone con la línea
+        base del motor, así que la lista efectiva vuelve a traer las rutas de fábrica y el
+        guardián sigue denegando. Que la simulación se haya vuelto imposible es la noticia
+        buena; lo que no puede pasar es que la prueba desaparezca con ella.
+
+        Ahora se simula lo que un guardián mal configurado hace de verdad y sí es
+        expresable: el fichero de política deja de existir en la ruta que el guardián lee.
+        """
         with Workspace("pol-off") as ws:
             ws.manifest(agents={"claude": {"required": True}})
-            ws.policy(protected_paths=[], secret_read_deny=[], block_secret_content=False)
+            ws.policy()
+            (ws.root / ".harness" / "policy.json").unlink()
             r = run_gate("G-POLICY", ws.context())
-            self.assert_status(r, FAIL)
-            self.assertTrue(any("guardián" in f.as_text().lower() or "GUARDIÁN" in f.as_text()
-                                for f in r.findings), [f.as_text() for f in r.findings])
+            self.assertNotEqual(PASS, r.status,
+                                "sin política en la ruta que el guardián lee, la puerta no "
+                                "puede aprobar")
+
+    def test_vaciar_lo_protegido_ya_no_es_expresable(self):
+        """La contraparte de lo anterior, y la propiedad que lo sustituye.
+
+        Un documento que declara `protected_paths: []` no desactiva nada: el efectivo es la
+        unión con la norma base. Se comprueba sobre la política CARGADA, que es la que aplica
+        el guardián, no sobre el documento escrito."""
+        from core.policy import Policy as _P
+        with Workspace("pol-vacia") as ws:
+            ws.manifest(agents={"claude": {"required": True}})
+            ruta = ws.policy(protected_paths=[], secret_read_deny=[])
+            efectiva = _P.load(ruta)
+            self.assertTrue(efectiva.is_protected("gates/g_agent.py"))
+            self.assertTrue(efectiva.is_protected("repo-hijo/gates/g_agent.py"))
+            self.assertTrue(efectiva.is_protected(".harness/policy.json"))
 
     def test_entrada_corrupta(self):
         with Workspace("pol-corrupt") as ws:

@@ -66,25 +66,31 @@ class TestElPadreAportaLoQueAPLICA_noLoQueESCRIBE(unittest.TestCase):
         self.assertEqual("deny", decide_command(pol, "mia x").outcome,
                          "lo que el hijo añade tiene que seguir aplicándose")
 
-    def test_la_CIMA_de_la_cadena_si_puede_vaciar_un_campo(self):
-        """V6 queda ABIERTA, y al medirla resultó no ser una violación del refinamiento.
+    def test_la_CIMA_de_la_cadena_YA_NO_puede_vaciar_un_campo(self):
+        """V6, **cerrada el 2026-09-23**. Esta prueba estaba invertida y decía por qué.
 
-        Un padre que declara `command_deny: []` está en la cima: no hay ninguna capa por
-        encima a la que esté relajando. `from_dict` honra su declaración explícita, y eso es
-        correcto — una capa de cliente tiene autoridad para decir exactamente lo que dice.
+        Lo que decía la versión anterior, literalmente: «lo cerraría un `policies/base.json`
+        versionado —con `refuto` como capa 1 de verdad—, no un parche aquí. Esta prueba fija
+        el comportamiento actual: si alguien lo cambia sin crear esa capa, cae y obliga a
+        explicar por qué.»
 
-        Lo que sí es un hueco, y es ARQUITECTÓNICO y no de esta función: los valores de fábrica
-        de refuto viven sólo como constantes en `core/policy.py`. No hay ninguna política base
-        EN DISCO que un cliente pueda extender, así que la cima de toda cadena real es el
-        cliente y nadie vigila lo que la cima retira.
+        La explicación. La capa 1 existe ahora, y no es un fichero en disco: es la LÍNEA BASE
+        DEL MOTOR (`core.trust.documento_raiz`), derivada de `Policy.default()` y compuesta
+        como padre implícito de toda cadena. Se eligió componer y no validar porque en los
+        campos `ACUMULA` el efectivo es la unión, y entonces vaciar `command_deny` deja de ser
+        una violación que haya que cazar para convertirse en algo que **no se puede escribir**
+        — la misma tesis que este módulo ya defendía para las aristas.
 
-        Lo cerraría un `policies/base.json` versionado —con `refuto` como capa 1 de verdad—,
-        no un parche aquí. Esta prueba fija el comportamiento actual: si alguien lo cambia sin
-        crear esa capa, cae y obliga a explicar por qué.
+        Un fichero en disco habría sido peor: es material y, por tanto, editable por quien
+        pueda escribir en el árbol. La norma raíz viaja con el código.
         """
         pol = Policy.load(_montar(_hijo(), {**PADRE_CALLA, "command_deny": []}))
-        self.assertEqual("allow", decide_command(pol, "rm -rf /").outcome,
-                         "el comportamiento documentado cambió: ¿existe ya la capa base?")
+        self.assertEqual("deny", decide_command(pol, "rm -rf /").outcome,
+                         "la cima vació `command_deny` y el efectivo se lo permitió: la "
+                         "composición con la raíz del motor no está actuando")
+        self.assertIn("sudo:*", pol.command_deny,
+                      "las órdenes denegadas de fábrica tienen que sobrevivir a una cima "
+                      "que declara la lista vacía")
 
 
 class TestEndureceNoSeBurlaPorOmision(unittest.TestCase):
@@ -103,11 +109,33 @@ class TestEndureceNoSeBurlaPorOmision(unittest.TestCase):
             Policy.load(_montar(_hijo(block_secret_content=False)))
         self.assertIn("block_secret_content", str(cm.exception))
 
-    def test_encenderla_cuando_el_padre_la_apaga_si_se_puede(self):
-        """La otra mitad: endurecer siempre se puede."""
-        pol = Policy.load(_montar(_hijo(block_secret_content=True),
-                                  {**PADRE_CALLA, "block_secret_content": False}))
+    def test_un_PADRE_que_la_apaga_tampoco_vale_aunque_el_hijo_la_encienda(self):
+        """La otra mitad, reescrita el 2026-09-23 al cerrarse V6.
+
+        Antes se comprobaba que un hijo pudiera ENCENDER lo que su padre apagaba, y el
+        efectivo salía `True`. Ese escenario ya no se puede construir: con la línea base del
+        motor como padre implícito, el documento del PADRE es él mismo un hijo de la raíz, y
+        apagar un endurecimiento de fábrica lo invalida — lo rescate el nieto o no.
+
+        Se rechaza en vez de absorberlo en silencio a propósito. Bajo semántica de `meet`
+        puro el efectivo sería `True` igualmente y no haría falta decir nada; pero entonces el
+        documento diría una cosa y el sistema haría otra, que es exactamente la situación de
+        «dos políticas» que este módulo existe para impedir. Un documento que declara algo que
+        no se puede honrar se arregla, no se interpreta.
+        """
+        with self.assertRaises(HerenciaIrresoluble) as cm:
+            Policy.load(_montar(_hijo(block_secret_content=True),
+                                {**PADRE_CALLA, "block_secret_content": False}))
+        self.assertIn("block_secret_content", str(cm.exception))
+
+    def test_endurecer_desde_la_linea_base_SIGUE_permitido(self):
+        """Sin esta mitad, la prueba de arriba se satisface rechazando toda política."""
+        pol = Policy.load(_montar(_hijo(protected_paths=["del-proyecto/**"]),
+                                  {**PADRE_CALLA, "block_secret_content": True}))
         self.assertTrue(pol.block_secret_content)
+        self.assertIn("del-proyecto/**", pol.protected_paths)
+        self.assertIn("del-cliente/**", pol.protected_paths)
+        self.assertTrue(pol.is_protected("gates/g_agent.py"))
 
 
 class TestElModoDelGuardianEsUnaRestriccion(unittest.TestCase):

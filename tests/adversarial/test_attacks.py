@@ -103,7 +103,7 @@ class TestTravesiaDeRutas(unittest.TestCase):
             d = decide_write(self.p, ws.root, "docs/atajo/comun.py", "manipulado")
             self.assertEqual(d.outcome, DENY,
                              "un enlace simbólico sorteó la protección del juez")
-            self.assertEqual(d.rule, "verificacion/**")
+            self.assertEqual(d.rule, "**/verificacion/**")
 
     @unittest.skipIf(os.name == "nt", "enlaces simbólicos")
     def test_enlace_simbolico_que_sale_del_espacio(self):
