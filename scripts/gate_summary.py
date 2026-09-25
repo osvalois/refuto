@@ -46,7 +46,9 @@ def main(argv) -> int:
     if len(argv) != 2:
         print("uso: gate_summary.py [--bloqueo-esperado] <run.json>", file=sys.stderr)
         return 64
-    doc = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+    # Acepta el sobre `harness.envelope/v1` y la forma suelta anterior.
+    from core.envelope import payload_of
+    doc = payload_of(json.loads(Path(argv[1]).read_text(encoding="utf-8")))
     counts = {}
     bloqueadas = []
     for gate in doc["gates"]:

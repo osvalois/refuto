@@ -66,11 +66,17 @@ ciclo de **13 fases** con criterio de entrada y de salida (ver [`docs/lifecycle/
 `NOT_APPLICABLE`, y la regla de la que se derivan las demás: **un ámbito vacío nunca aprueba**.
 Una comprobación que no encontró nada que comprobar no ha pasado.
 
-> Estado medido del vocabulario, 2026-09-22 (E2, lectura de `core/model.py` y de `gates/*.py`): el
-> motor implementa hoy **`PASS` `FAIL` `BLOCKED` `NOT_EXECUTABLE`**. `NOT_RUN`, `INCONCLUSIVE` y
-> `NOT_APPLICABLE` son parte del contrato declarado y **todavía no** del tipo `Result`; varias
-> puertas usan `BLOCKED` para decir «aquí no aplica» (`gates/g_sdd.py`). Es una divergencia
-> conocida, no una capacidad. Ver [`docs/estado-del-proyecto.md`](docs/estado-del-proyecto.md).
+> Estado medido del vocabulario, 2026-09-23 (E2, `core/model.py::STATUSES`): el motor
+> implementa **`PASS` `FAIL` `BLOCKED` `NOT_EXECUTABLE` `NOT_APPLICABLE` `INCONCLUSIVE`** —
+> seis. `INCONCLUSIVE` se añadió para poder decir «las dos fuentes de verdad no coinciden»,
+> que es el estado en el que queda un artefacto de evidencia que contradice al diario. `NOT_RUN`
+> sigue siendo vocabulario del método, no del tipo: describe una comprobación que nadie lanzó,
+> y el tipo sólo existe cuando algo se ejecutó. Varias puertas siguen usando `BLOCKED` para
+> decir «aquí no aplica» (`gates/g_sdd.py`): divergencia conocida, no capacidad.
+>
+> Y la regla tiene ahora forma ejecutable: **`PASS` exige cobertura declarada**
+> (`Result.scope`). Una puerta que aprueba sin decir cuántos sujetos observó no produce una
+> corrida integrable. Ver [`docs/assurance/FORMAL-MODEL.md`](docs/assurance/FORMAL-MODEL.md).
 
 ## Qué hace, concretamente
 
@@ -163,14 +169,49 @@ Y lo que **no** está probado, con su estado:
 
 | Sujeto | Estado | Por qué |
 |---|---|---|
-| Ejecución en **Linux** | `NOT_RUN` | nunca se ha ejecutado la suite ahí |
 | Ejecución en **Windows** | `NOT_RUN` | los arreglos de portabilidad existen y se midieron en una rama aislada; sobre este árbol no se han ejecutado. 1 prueba queda omitida en macOS por ser sólo de Windows |
-| **Python 3.10**, el mínimo declarado | `NOT_RUN` | no hay intérprete 3.10 en la máquina donde se mide |
-| **CI en GitHub Actions** | `NOT_RUN` | el flujo está escrito y **nunca ha corrido en verde** en el runner |
+| **`I6`: el agente no puede escribir al juez** | `NOT_PROVEN` | no es demostrable en esta frontera: el efecto de una orden no es computable y el agente corre con el uid del operador. Se afirma `I6'` en su lugar — ver [`SECURITY.md`](SECURITY.md) |
+| **Truncar la cola del diario** | `NOT_PROVEN` | la cadena de huellas no lo ve sin un ancla publicada fuera del árbol |
+| **Cobertura declarada en las 13 puertas** | `NOT_RUN` | `core/lock.py` ya la declara; `gates/**` está protegido y el cambio va propuesto en [`docs/remediation/gates-cobertura.patch`](docs/remediation/gates-cobertura.patch). Hasta que se aplique, una puerta sin cobertura no produce corrida integrable |
 | `codex` en ejecución real | `NOT_RUN` | hay adapter y sonda; no hay ejecución observada conduciendo trabajo |
 | `antigravity` en ejecución real | `NOT_RUN` | el dialecto se derivó de la documentación embebida en el binario 2.15.1 (leída el 2026-09-21); no se observó una decisión suya en vivo |
 | `gemini` / `opencode` con guardián | `NOT_RUN` | no hay enganche que verificar |
 | Ciclo completo de las 13 fases | `NOT_RUN` | se ejecutó `TEST` |
+
+## Consumirlo desde un agente: `refuto mcp-serve`
+
+Toda orden migrada emite `harness.envelope/v1` con `--json` —estado de los seis, código de
+salida **derivado** del estado, procedencia, y `next` con qué hacer, por qué y de quién es el
+turno (`persona` · `maquina` · `agente`)—. Y esa misma respuesta se sirve por MCP stdio:
+
+```json
+{ "mcpServers": {
+    "refuto": { "command": "python3",
+                "args": ["/ruta/a/refuto/refuto.py", "mcp-serve"] } } }
+```
+
+Siete herramientas: `refuto_doctor`, `refuto_status`, `refuto_verify`, `refuto_probe`,
+`refuto_mcp_check`, `refuto_inventory`, `refuto_upgrade_plan`. Habla `server/discover`
+(2026-07-28) y cae a `initialize` (2025-06-18), igual que el cliente de refuto — que es el que
+lo verifica en la suite.
+
+**Tres cosas que esta superficie no hace, y son contrato probado:**
+
+- **No ejecuta órdenes arbitrarias.** El `argv` sale de una tabla fija; el modelo sólo aporta una
+  ruta de espacio y booleanos, validados uno a uno. No hay concatenación de cadenas.
+- **No escribe lo que gobierna.** Ni `--apply`, ni `--force`, ni `wire`/`unwire`, ni `install`.
+  `upgrade` se expone sólo como **plan**. Un agente que pudiera actualizar su propio arnés o
+  recablear su propio guardián sería otra vez juez de sí mismo. `verify` sí emite evidencia, que
+  es su función: un diario de sólo añadir y encadenado — emitir una verificación no es
+  falsificarla.
+- **No gasta dinero.** `--deep` no se expone: el sondeo profundo envía un prompt de pago y su
+  coste no está medido.
+
+Un servidor **stdio** corre en la máquina de quien lo usa, así que no hay nada que alojar ni que
+pagar, y no tiene superficie entrante: no escucha, lo arranca el cliente. Un servidor remoto
+tendría además que exponer el diario y la política, que es exactamente lo que el modelo de
+confianza protege. La decisión y sus alternativas, en
+[ADR-0015](docs/decisions/ADR-0015-un-vocabulario-tres-consumidores.md).
 
 ## Qué no es
 

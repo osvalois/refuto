@@ -39,6 +39,8 @@ Sólo biblioteca estándar. Se ejecuta con `python3 refuto.py` o `./refuto.py`.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -51,8 +53,8 @@ from core import report as R                                             # noqa:
 from core.context import Context                                         # noqa: E402
 from core.evidence import read_events, verdict_of, write_run             # noqa: E402
 from core.model import (                                                 # noqa: E402
-    BLOCKED, FAIL, FUNCTIONAL, KIND_VERIFICATION, NOT_EXECUTABLE, PASS, new_id, now, rung,
-    write_json,
+    BLOCKED, FAIL, FUNCTIONAL, INCONCLUSIVE, KIND_VERIFICATION, NOT_APPLICABLE,
+    NOT_EXECUTABLE, PASS, new_id, now, rung, write_json,
 )
 from core.proc import TEXT_IO, force_utf8_io
 
@@ -60,14 +62,54 @@ REPO = Path(__file__).resolve().parent
 
 # Códigos de salida. Tres, no dos: la diferencia entre «falló» y «no se pudo comprobar» es la
 # razón de ser de refuto de gobierno, y desaparecería al colapsarlos.
-EXIT_OK = 0
-EXIT_FAIL = 1
-EXIT_BLOCKED = 2
-EXIT_USAGE = 64
+#
+# Viven en `core.envelope` y se importan: ahora los DERIVA el estado, y tener las constantes
+# junto a la tabla que las deriva es lo que impide que vuelvan a divergir. Aquí se reexportan
+# con el mismo nombre para no tocar ninguna de sus ~120 apariciones.
+from core.envelope import (  # noqa: E402
+    AGENTE, EXIT_BLOCKED, EXIT_FAIL, EXIT_OK, EXIT_USAGE, MAQUINA, PERSONA, Siguiente,
+    envelope, exit_for,
+)
+
+
+#: El mismo texto para las 24 órdenes. Una bandera que se explica distinto en cada sitio es una
+#: bandera que se comporta distinto en cada sitio, y aquí es justo lo contrario: un contrato.
+AYUDA_JSON = ("la respuesta en `harness.envelope/v1`: estado, código derivado, procedencia, "
+              "carga útil y qué toca después")
 
 
 def _ws(opts) -> Path:
     return Path(opts.workspace or os.getcwd()).resolve()
+
+
+def responder(opts, *, command: str, status: str, payload=None, run_id: str = "",
+              next: list | None = None, ws: Path | None = None) -> int:
+    """Declara la respuesta ESTRUCTURADA de una orden y devuelve su código de salida.
+
+    Por qué el sobre se construye aquí y se imprime en `main`
+    --------------------------------------------------------
+    Construirlo ya, en la orden, hace que un sobre mal formado —un estado que no aprueba sin
+    `next`, un turno inventado— reviente **en la orden que lo cometió** y no en el emisor, que
+    es donde nadie sabría de quién era. Imprimirlo en `main` hace que haya **un solo** sitio que
+    decide el formato: el defecto que esto cierra era justo el contrario, veinte `json.dumps` en
+    línea y por tanto veinte contratos (medido el 2026-09-24).
+
+    Es aditivo por construcción: una orden que no llama a `responder` se comporta exactamente
+    como antes, y sin `--json` lo único que cambia es que el código de salida lo deriva el
+    estado en vez de elegirlo la orden a mano.
+    """
+    from core.model import provenance
+
+    espacio = ws if ws is not None else _ws(opts)
+    opts._sobre = envelope(
+        command=command, status=status, workspace=espacio,
+        payload=payload if payload is not None else {},
+        run_id=run_id, next=list(next or ()),
+        # La procedencia no es decorado: una cifra sin su commit y su máquina no es una
+        # medición, y es lo que permite correlacionar dos respuestas del mismo espacio.
+        provenance=provenance(espacio) if espacio.exists() else {},
+    )
+    return exit_for(status)
 
 
 # ── doctor ───────────────────────────────────────────────────────────────────────────
@@ -92,8 +134,12 @@ def cmd_doctor(opts) -> int:
     ctx = Context(workspace=ws)
     for label, path in (("manifiesto", ctx.manifest_path), ("lock", ctx.lock_path),
                         ("política", ctx.policy_path)):
+        # El remedio sale de la MISMA tabla que alimenta `next`, y por eso no pueden divergir.
+        # Decía «ejecute `refuto init`» para los tres, y para el lock era doblemente falso: la
+        # orden es `refuto lock init` y anclar un origen es un acto de persona.
+        arreglo = (_REMEDIO_ARTEFACTO.get(label) or {}).get("do", "")
         checks.append((label, path.is_file(), str(path) if path.is_file() else
-                       f"falta — ejecute `refuto init`"))
+                       (f"falta — ejecute `{arreglo}`" if arreglo else "falta")))
 
     # El lanzador del guardián, y a quién pertenece lo que escribe.
     from core import launcher
@@ -132,28 +178,86 @@ def cmd_doctor(opts) -> int:
 
     functional = [r for r in reports if rung(r.level) >= rung(FUNCTIONAL)]
     broken = [r for r in reports if rung(r.level) < rung(FUNCTIONAL)]
+    # El resumen accionable se ACUMULA en vez de imprimirse suelto, y se imprime desde la lista.
+    # Así la persona y el agente leen lo mismo: antes el texto decía «→ falta: lock» y la cara
+    # estructurada no existía, de modo que el consejo sólo llegaba a quien mira una terminal.
+    siguientes: list = []
+    for r in broken:
+        siguientes.append(Siguiente(why=f"{r.agent}: {_remedy(r)}",
+                                    do="refuto probe --verbose", who=PERSONA))
+    missing = [n for n, ok, _ in checks if not ok]
+    for falta in missing:
+        siguientes.append(Siguiente(**_REMEDIO_ARTEFACTO.get(
+            falta, {"why": f"falta {falta}", "do": "", "who": PERSONA})))
+    if ruta.problems:
+        siguientes.append(Siguiente(
+            why="enrutado roto: la sesión abrirá y fallará en el primer mensaje",
+            do="refuto chat --provider clean", who=PERSONA))
+    elif ruta.overridden:
+        siguientes.append(Siguiente(
+            why=f"sus sesiones van a «{ruta.provider}», no a su suscripción",
+            do=prov.how_to_find(list(ruta.overrides)), who=PERSONA))
+    if own.get("count"):
+        siguientes.append(Siguiente(
+            why=f"{own['count']} archivos de .harness/ son de otro usuario: el rastro de "
+                f"auditoría se corta en silencio (secuela de una sesión con sudo)",
+            do=own["fix"], who=PERSONA))
+
     print(R.bold("  Resumen accionable"))
     if not functional:
         print(R.paint("    ✗ ningún agente alcanza FUNCTIONAL: este espacio no puede operar", "31"))
-    for r in broken:
-        action = _remedy(r)
-        print(R.paint(f"    → {r.agent}: {action}", "33"))
-    missing = [n for n, ok, _ in checks if not ok]
-    if missing:
-        print(R.paint(f"    → falta: {', '.join(missing)}", "33"))
-    if ruta.problems:
-        print(R.paint("    → enrutado roto: la sesión abrirá y fallará en el primer mensaje.", "31"))
-        print(R.dim("       Abra limpio con: refuto chat --provider clean"))
-    elif ruta.overridden:
-        print(R.paint(f"    → sus sesiones van a «{ruta.provider}», no a su suscripción.", "33"))
-    if own.get("count"):
-        print(R.paint(f"    → propiedad: {own['fix']}", "33"))
-        print(R.dim(f"       (secuela de una sesión con sudo; sin esto pierde su propio "
-                    f"rastro de auditoría)"))
-    if functional and not broken and not missing:
+    for s in siguientes:
+        print(R.paint(f"    → {s.why}", "33"))
+        if s.do:
+            print(R.dim(f"       hacer  {s.do}"))
+        print(R.dim(f"       quién  {s.who}"))
+    if functional and not siguientes:
         print(R.paint("    ✓ nada que arreglar", "32"))
     print()
-    return EXIT_OK if functional else EXIT_FAIL
+
+    # El estado se conserva tal cual estaba —`functional` decide— porque cambiarlo rompería a
+    # quien ya encadena `refuto doctor && …`. Lo que es nuevo es que el consejo viaje: un
+    # `PASS` con `next` significa «puede operar, y además tienes esto pendiente», que es
+    # exactamente lo que el texto ya decía y la máquina no podía leer.
+    return responder(opts, command="doctor", status=PASS if functional else FAIL, ws=ws,
+                     next=siguientes,
+                     payload={"schema": "harness.doctor/v1",
+                              "agents": [r.to_dict() for r in reports],
+                              "environment": [{"name": n, "ok": ok, "detail": d}
+                                              for n, ok, d in checks],
+                              "provider": {"provider": ruta.provider,
+                                           "overridden": ruta.overridden,
+                                           "problems": list(ruta.problems),
+                                           "warnings": list(ruta.warnings)},
+                              "functional": [r.agent for r in functional],
+                              "broken": [r.agent for r in broken]})
+
+
+#: Qué hacer cuando falta un artefacto, y **de quién es el turno**. Antes el texto decía
+#: «falta — ejecute `refuto init`» para los tres por igual, y para el lock era falso por dos
+#: motivos: la orden es `refuto lock init`, y anclar un origen inmutable es un acto de persona.
+#: La puerta G-LOCK decía una tercera cosa. Tres instrucciones para el mismo hueco, medido el
+#: 2026-09-24; aquí hay una, y la enuncia quien la puede cumplir.
+_REMEDIO_ARTEFACTO = {
+    "manifiesto": {"why": "no hay manifiesto: el espacio no declara qué necesita",
+                   "do": "refuto install", "who": MAQUINA},
+    "política": {"why": "no hay política: sin ella el guardián aplica los valores de fábrica",
+                 "do": "refuto install", "who": MAQUINA},
+    "lock": {"why": "no hay lock: el espacio no declara con qué origen se materializó, y "
+                    "G-LOCK no puede afirmar nada",
+             "do": "refuto lock init", "who": PERSONA},
+    "python": {"why": "la versión de python es anterior a la mínima (3.10)",
+               "do": "", "who": PERSONA},
+    "git": {"why": "git no está en el PATH: sin él no hay procedencia ni lock",
+            "do": "", "who": PERSONA},
+    "gh": {"why": "gh no está en el PATH: las órdenes de GitHub no se podrán ejecutar",
+           "do": "", "who": PERSONA},
+    "glab": {"why": "glab no está en el PATH: las órdenes de GitLab no se podrán ejecutar",
+             "do": "", "who": PERSONA},
+    "lanzador": {"why": "el lanzador del guardián no resuelve: el espacio corre sin control "
+                        "preventivo",
+                 "do": "refuto policy wire --agent claude", "who": MAQUINA},
+}
 
 
 def _remedy(rep) -> str:
@@ -162,7 +266,7 @@ def _remedy(rep) -> str:
         return (f"certificado de firma REVOCADO → reinstale el agente "
                 f"(p. ej. `npm i -g @openai/{rep.agent}@latest`) y vuelva a sondear")
     if rep.level == "NOT_INSTALLED":
-        return f"no está instalado → instálelo o quítelo de `agents` en el manifiesto"
+        return "no está instalado → instálelo o quítelo de `agents` en el manifiesto"
     if "sin respuesta" in rep.stopped_because or "colgado" in rep.stopped_because:
         return (f"arranca pero no responde al handshake → compruebe la sesión "
                 f"(`{rep.agent} auth` / login) y los permisos del binario")
@@ -177,19 +281,30 @@ def cmd_probe(opts) -> int:
     ws = _ws(opts)
     specs = [ADAPTERS[a] for a in opts.agent] if opts.agent else all_specs()
     reports = probe_all(specs, deep=opts.deep, workspace=ws)
-    if opts.json:
-        print(json.dumps([r.to_dict() for r in reports], ensure_ascii=False, indent=2))
+    print(R.render_probes(reports))
+    if opts.verbose:
+        for r in reports:
+            print(f"  {R.bold(r.agent)}")
+            for s in r.steps:
+                mark = "✓" if s["ok"] else "✗"
+                print(f"    {mark} {s['step']:<18} {R.dim(str(s['detail'])[:110])}")
+            print()
+
+    rotos = [r for r in reports if rung(r.level) < rung(FUNCTIONAL)]
+    siguientes = [Siguiente(why=f"{r.agent}: {_remedy(r)}", do="refuto probe --verbose",
+                            who=PERSONA) for r in rotos]
+    # Cero agentes sondeados no es «todos funcionan». Con `--agent` de un nombre desconocido, o
+    # sin ningún adapter, la comprobación `all(...)` de antes daba `True` sobre una lista vacía
+    # y la sonda salía con 0 sin haber medido nada.
+    if not reports:
+        estado = BLOCKED
+        siguientes.append(Siguiente(
+            why="no se sondeó ningún agente: un ámbito vacío no aprueba",
+            do="refuto probe", who=PERSONA))
     else:
-        print(R.render_probes(reports))
-        if opts.verbose:
-            for r in reports:
-                print(f"  {R.bold(r.agent)}")
-                for s in r.steps:
-                    mark = "✓" if s["ok"] else "✗"
-                    print(f"    {mark} {s['step']:<18} {R.dim(str(s['detail'])[:110])}")
-                print()
-    ok = all(rung(r.level) >= rung(FUNCTIONAL) for r in reports)
-    return EXIT_OK if ok else EXIT_FAIL
+        estado = FAIL if rotos else PASS
+    return responder(opts, command="probe", status=estado, ws=ws, next=siguientes,
+                     payload=[r.to_dict() for r in reports])
 
 
 # ── discover ────────────────────────────────────────────────────────────────────────
@@ -456,7 +571,6 @@ def cmd_install(opts) -> int:
     """
     from core import binding, context_files, launcher, wire
     from core.discovery import discover
-    from core.policy import Policy
 
     ws = _ws(opts)
     pasos: list = []
@@ -879,7 +993,13 @@ def cmd_upgrade(opts) -> int:
         print(f"\n  {R.paint('✗', '31')} no hay {manifiesto.relative_to(ws)}: "
               f"este espacio no está inicializado.")
         print(R.dim(f"      python3 {REPO}/refuto.py --workspace {ws} install\n"))
-        return EXIT_FAIL
+        return responder(opts, command="upgrade", status=NOT_EXECUTABLE, ws=ws,
+                         payload={"schema": "harness.upgrade/v1", "declared": "",
+                                  "engine": motor},
+                         next=[Siguiente(
+                             why="el espacio no está inicializado: no hay manifiesto que "
+                                 "actualizar",
+                             do=f"refuto --workspace {ws} install", who=MAQUINA)])
 
     doc = json.loads(manifiesto.read_text(encoding="utf-8"))
     declarada = (doc.get("harness") or {}).get("version") or ""
@@ -888,9 +1008,19 @@ def cmd_upgrade(opts) -> int:
     print(f"    declara  {declarada or '(nada)'}")
     print(f"    motor    {motor}")
 
-    if declarada == motor:
+    # Qué le falta a la política del espacio respecto de la norma del motor. Se mide siempre,
+    # incluso «al día», porque la versión y la norma se mueven por separado: `upgrade` no toca la
+    # política **por diseño** (una extensión es decisión de una persona), así que un espacio
+    # puede estar en la versión del motor y llevar la norma de hace tres correcciones. Medido el
+    # 2026-09-24: 6 de 8 espacios gobernados con una instantánea distinta de la norma.
+    deriva_norma = _deriva_de_norma(ws)
+
+    if declarada == motor and not deriva_norma:
         print(f"\n  {R.paint('✓', '32')} al día. Nada que hacer.\n")
-        return EXIT_OK
+        return responder(opts, command="upgrade", status=PASS, ws=ws,
+                         payload={"schema": "harness.upgrade/v1", "declared": declarada,
+                                  "engine": motor, "applied": False,
+                                  "policy_drift": []})
 
     # Una política que el motor no entiende invalida la actualización: no se sabe qué se
     # estaría preservando.
@@ -902,7 +1032,14 @@ def cmd_upgrade(opts) -> int:
         except PoliticaIlegible as exc:
             print(f"\n  {R.paint('✗', '31')} BLOQUEADO: {exc}")
             print(R.dim("      Se arregla la política antes de actualizar, no después.\n"))
-            return EXIT_FAIL
+            return responder(opts, command="upgrade", status=BLOCKED, ws=ws,
+                             payload={"schema": "harness.upgrade/v1", "declared": declarada,
+                                      "engine": motor, "applied": False,
+                                      "policy_unreadable": str(exc)},
+                             next=[Siguiente(
+                                 why=f"la política no se puede interpretar, así que no se sabe "
+                                     f"qué preservaría la actualización: {exc}",
+                                 do="refuto policy show", who=PERSONA)])
 
     cambios = _cambios_entre(declarada, motor)
     if cambios:
@@ -912,9 +1049,35 @@ def cmd_upgrade(opts) -> int:
     else:
         print(R.dim("\n      (el CHANGELOG no declara entradas entre esas versiones)"))
 
+    siguientes: list = []
+    if declarada != motor:
+        siguientes.append(Siguiente(
+            why=f"el espacio declara {declarada or '(nada)'} y el motor es {motor}",
+            do=f"refuto --workspace {ws} upgrade --apply", who=MAQUINA))
+    if deriva_norma:
+        print(f"\n  {R.bold('La norma del espacio va por detrás del motor')}")
+        for p in deriva_norma[:12]:
+            print(R.paint(f"      ✗ falta  {p}", "33"))
+        print(R.dim("      `upgrade` NO toca la política: una extensión es decisión de una "
+                    "persona.\n      Si esa lista son patrones que su espacio copió y no "
+                    "modificó, la forma de\n      volver a heredarlos es reducir su política a "
+                    "su identidad y dejar que el\n      motor aporte la norma."))
+        siguientes.append(Siguiente(
+            why=f"la política del espacio no cubre {len(deriva_norma)} patrón(es) que la norma "
+                f"del motor protege: {', '.join(deriva_norma[:4])}"
+                f"{'…' if len(deriva_norma) > 4 else ''}. `upgrade` no la toca por diseño",
+            do="refuto policy show", who=PERSONA))
+
     if not opts.apply:
         print(f"\n  {R.paint('·', '33')} en seco. Añada --apply para actualizar.\n")
-        return EXIT_OK
+        # En seco y con algo pendiente: `BLOCKED` es el estado honesto —no se hizo, y hay
+        # trabajo— y su código es 2, el mismo que ya devolvía el resto de caminos «no se pudo».
+        # Antes devolvía 0, indistinguible de «al día».
+        return responder(opts, command="upgrade", status=BLOCKED, ws=ws, next=siguientes,
+                         payload={"schema": "harness.upgrade/v1", "declared": declarada,
+                                  "engine": motor, "applied": False,
+                                  "policy_drift": deriva_norma,
+                                  "changelog": cambios})
 
     copia = manifiesto.with_name(manifiesto.name + f".antes-de-{declarada or 'nada'}")
     copia.write_bytes(manifiesto.read_bytes())   # copia exacta, byte a byte
@@ -925,15 +1088,94 @@ def cmd_upgrade(opts) -> int:
     write_json(manifiesto, doc)
 
     # El lanzador del guardián graba la ruta del motor a fuego; regenerarlo es la mitad útil
-    # de actualizar.
+    # de actualizar. Se regeneran TODOS los runtimes que este espacio tenga cableados, no sólo
+    # Claude: antes sólo se llamaba a `wire_claude`, así que un espacio cableado para Antigravity
+    # o para Kiro salía de `upgrade --apply` con punteros al motor viejo y el mensaje decía que
+    # se había actualizado. Medido el 2026-09-24.
     from core import wire
-    resultados = wire.wire_claude(ws, harness_root=REPO)
+    resultados = list(wire.wire_claude(ws, harness_root=REPO))
+    recableados = ["claude"]
+    if (ws / ".agents" / "hooks.json").is_file():
+        resultados += list(wire.wire_antigravity(ws, harness_root=REPO))
+        recableados.append("antigravity")
+    if (ws / ".kiro").is_dir():
+        resultados += list(wire.wire_kiro_agents(ws, harness_root=REPO))
+        recableados.append("kiro")
+
     print(f"\n  {R.paint('✓', '32')} {declarada or '(nada)'} → {motor}")
     print(R.dim(f"      copia previa: {copia.name}"))
+    print(R.dim(f"      runtimes recableados: {', '.join(recableados)}"))
     for r in resultados:
         print(R.dim(f"      {r.action:<9} {r.path}"))
     print()
-    return EXIT_OK
+    # Se actualizó la versión y el cableado; si la norma sigue por detrás, eso queda dicho y con
+    # turno asignado, en vez de desaparecer detrás de un ✓.
+    return responder(opts, command="upgrade", status=BLOCKED if deriva_norma else PASS, ws=ws,
+                     next=siguientes if deriva_norma else [],
+                     payload={"schema": "harness.upgrade/v1", "declared": declarada,
+                              "engine": motor, "applied": True,
+                              "rewired": recableados,
+                              "policy_drift": deriva_norma,
+                              "backup": str(copia)})
+
+
+def _deriva_de_norma(ws: Path) -> list:
+    """En qué se queda corta la política EFECTIVA del espacio respecto de la norma del motor.
+
+    Lo que se midió, y la corrección que trae
+    -----------------------------------------
+    La hipótesis de partida era que una corrección de la norma base no llega nunca a un espacio
+    ya instalado, porque `init`/`install` copian la norma entera y `upgrade` no toca la política.
+    **Medido el 2026-09-24 y falsado en la mitad que importa:** `Policy.load` compone toda
+    política con la raíz del motor (`core.trust.componer_con_raiz`), y `protected_paths` ACUMULA,
+    así que el efectivo es la UNIÓN. Con una política al estilo anterior —patrones anclados a la
+    raíz— el efectivo ya trae los `**/` del motor y `repo-hijo/.harness/bin/guard` sale `deny`
+    sin tocar nada. Las protecciones nuevas SÍ se propagan solas.
+
+    La mitad que no se propaga es la que abre agujeros, y por la razón contraria:
+    `writable_paths` es `REDUCE` y la lista del hijo manda, así que un espacio que declaró la
+    excepción anclada a la raíz se queda con ella —`repo-hijo/.harness/memory/nota.md` sigue
+    denegado— y **no lo nota**, porque nada se lo dice. No es un agujero: es una denegación
+    colateral que el dueño no pidió y no sabe que tiene.
+
+    Por eso se mide la EXCEPCIÓN, que es donde la deriva es real y silenciosa, y se comprueba por
+    cobertura a dos profundidades igual que `core.refinement._cubre`: `X` y `**/X` no son la
+    misma cadena y la diferencia es justo si alcanza a los repositorios hijos.
+
+    Esto no arregla la deriva: la MIDE y la nombra. Arreglarla es decisión de persona, que es
+    también el motivo de que `upgrade` no lo haga solo.
+    """
+    from core.policy import DEFAULT_PROTECTED, DEFAULT_WRITABLE, PoliticaIlegible, Policy
+
+    pf = ws / ".harness" / "policy.json"
+    if not pf.is_file():
+        return []
+    try:
+        pol = Policy.load(pf)
+    except PoliticaIlegible:
+        return []       # ilegible se trata aparte, y con su propio estado
+
+    def _muestras(patron: str) -> list:
+        cuerpo = patron.removeprefix("**/").removesuffix("/**")
+        if patron.endswith("/**"):
+            return [f"{cuerpo}/sonda", f"repo-hijo/{cuerpo}/sonda"]
+        suelto = cuerpo.replace("*", "sonda")
+        return [suelto, f"repo-hijo/{suelto}"]
+
+    faltan = []
+    # La excepción: donde la deriva es real. Si la norma del motor la concede a cualquier
+    # profundidad y la del espacio sólo en la raíz, los repositorios hijos la pierden.
+    for patron in DEFAULT_WRITABLE:
+        if not all(pol.is_writable(m) for m in _muestras(patron)):
+            faltan.append(patron)
+    # La protección: hoy se propaga por la unión con la raíz del motor, así que esto debería
+    # salir vacío siempre. Se comprueba igual, y es deliberado: si alguien cambia la monotonía de
+    # `protected_paths` y la unión deja de aplicarse, esta lista lo dirá en el primer `upgrade`
+    # en vez de dentro de un año y en un espacio ajeno.
+    for patron in DEFAULT_PROTECTED:
+        if not all(pol.is_protected(m) for m in _muestras(patron)):
+            faltan.append(patron)
+    return faltan
 
 
 def cmd_verify(opts) -> int:
@@ -951,26 +1193,53 @@ def cmd_verify(opts) -> int:
 
     results = run_all(ctx, only=only)
     verdict = verdict_of(results)
-    if opts.json:
-        print(json.dumps({"run_id": ctx.run_id, "verdict": verdict,
-                          "gates": [r.to_dict() for r in results]},
-                         ensure_ascii=False, indent=2))
-    else:
-        print(R.render(results, verdict, verbose=opts.verbose))
+    print(R.render(results, verdict, verbose=opts.verbose))
     path = write_run(ws, ctx.run_id, results)
-    if not opts.json:
-        print(f"  Evidencia: {path.relative_to(ws)}\n")
+    print(f"  Evidencia: {path.relative_to(ws)}\n")
 
+    # El estado AGREGADO de la verificación, del que se deriva el código. Antes cada rama
+    # devolvía su número a mano; aquí se nombra el estado y la tabla de `core.envelope` hace la
+    # proyección. Los cuatro casos dan exactamente los mismos códigos que antes —1, 2, 2, 0—,
+    # comprobado en `tests/selftest/test_gates.py`.
     statuses = {r.status for r in results}
     if statuses & {FAIL, NOT_EXECUTABLE}:
-        return EXIT_FAIL
-    if BLOCKED in statuses:
-        return EXIT_BLOCKED
-    # Ninguna puerta encontró sujeto. No salió mal, pero tampoco demostró nada: salir con 0
-    # aquí sería exactamente el aprobado vacuo que `NOT_APPLICABLE` existe para hacer visible.
-    if statuses and PASS not in statuses:
-        return EXIT_BLOCKED
-    return EXIT_OK
+        estado = FAIL
+    elif BLOCKED in statuses:
+        estado = BLOCKED
+    elif not statuses:
+        # Cero puertas ejecutadas. Antes esto caía en el `return EXIT_OK` final: un ámbito vacío
+        # aprobando, que es justo lo que este programa existe para no hacer. La regla ya estaba
+        # escrita para las suites («una suite que ejecuta 0 pruebas falla») y no se aplicaba a
+        # la propia verificación.
+        estado = BLOCKED
+    elif PASS not in statuses:
+        # Ninguna puerta encontró sujeto. No salió mal, pero tampoco demostró nada: aprobar
+        # aquí sería el aprobado vacuo que `NOT_APPLICABLE` existe para hacer visible.
+        estado = BLOCKED
+    else:
+        estado = PASS
+
+    siguientes: list = []
+    if not statuses:
+        siguientes.append(Siguiente(
+            why="la verificación no ejecutó ninguna puerta: un ámbito vacío no aprueba",
+            do="refuto verify", who=PERSONA))
+    for r in results:
+        if r.status == PASS or r.status == NOT_APPLICABLE:
+            continue
+        detalle = (r.findings[0].get("detail") or r.findings[0].get("summary") or "").strip() \
+            if r.findings and isinstance(r.findings[0], dict) else ""
+        siguientes.append(Siguiente(
+            why=f"{r.id} ({r.name}) → {r.status}" + (f": {detalle[:160]}" if detalle else ""),
+            do=f"refuto verify --gate {r.id}",
+            # Una puerta en rojo la arregla quien escribe el código; una BLOQUEADA suele ser un
+            # instrumento ausente o una decisión pendiente, y eso no lo cierra un agente.
+            who=AGENTE if r.status == FAIL else PERSONA))
+    return responder(opts, command="verify", status=estado, ws=ws, run_id=ctx.run_id,
+                     next=siguientes,
+                     payload={"schema": "harness.run/v1", "run_id": ctx.run_id,
+                              "verdict": verdict, "evidence": str(path),
+                              "gates": [r.to_dict() for r in results]})
 
 
 # ── policy ───────────────────────────────────────────────────────────────────────────
@@ -1196,8 +1465,32 @@ def cmd_mcp(opts) -> int:
     from gates.base import run_gate
     result = run_gate("G-MCP", ctx)
     print(R.render([result], verdict_of([result]), verbose=True))
-    return EXIT_OK if result.status == PASS else (
-        EXIT_BLOCKED if result.status == BLOCKED else EXIT_FAIL)
+    # El estado de la puerta ES el estado de la orden: no hay nada que agregar, y traducirlo a
+    # mano era lo que lo rompía. Con `NOT_APPLICABLE` esto devolvía **1**, es decir «algo está
+    # mal», para un espacio que legítimamente no declara MCP — y la puerta dice literalmente
+    # «no es un aprobado: es que la puerta no tiene sujeto aquí». Ahora lo proyecta la tabla.
+    siguientes = [] if result.status in (PASS, NOT_APPLICABLE) else [Siguiente(
+        why=f"G-MCP → {result.status}: {result.measure[:160]}",
+        do="refuto mcp", who=AGENTE if result.status == FAIL else PERSONA)]
+    return responder(opts, command="mcp", status=result.status, ws=ws, next=siguientes,
+                     payload={"schema": "harness.result/v1", **result.to_dict()})
+
+
+def cmd_mcp_serve(opts) -> int:
+    """Sirve refuto por MCP stdio. NO lleva `--json`: aquí stdout ES el protocolo.
+
+    Es la única orden que no puede emitir un sobre por stdout, porque su stdout está ocupado por
+    JSON-RPC. Lo que devuelve un sobre es cada herramienta de dentro, que es donde el consumidor
+    lo necesita.
+    """
+    from core.mcp_server import HERRAMIENTAS, serve
+
+    ws = _ws(opts)
+    # El aviso va a stderr a propósito: en stdout rompería el flujo del cliente en el primer
+    # mensaje, que es exactamente el defecto que se midió con `doctor --json` el 2026-09-24.
+    print(f"refuto mcp-serve · espacio {ws} · {len(HERRAMIENTAS)} herramientas · "
+          f"sólo lectura", file=sys.stderr)
+    return serve(ws)
 
 
 # ── inventory ────────────────────────────────────────────────────────────────────────
@@ -1206,16 +1499,15 @@ def cmd_inventory(opts) -> int:
     ws = _ws(opts)
     inv = build(ws, depth=opts.depth)
     out_dir = REPO / "artifacts"
-    if opts.json:
-        print(json.dumps(inv, ensure_ascii=False, indent=2))
-    else:
-        print(render_text(inv))
+    print(render_text(inv))
     if opts.save:
         write_json(out_dir / "inventory.json", inv)
         (out_dir / "inventory.md").write_text(render_text(inv, markdown=True),
                                               encoding="utf-8", newline="\n")
         print(R.dim(f"\n  guardado en {out_dir}/inventory.json y .md\n"))
-    return EXIT_OK
+    return responder(opts, command="inventory", status=PASS, ws=ws,
+                     payload={"schema": "harness.inventory/v1", **inv}
+                     if isinstance(inv, dict) else inv)
 
 
 # ── evidence ─────────────────────────────────────────────────────────────────────────
@@ -1305,7 +1597,7 @@ def cmd_chat(opts) -> int:
         print(sp.brief)
         return EXIT_OK
 
-    print(R.dim(f"  diario             .harness/evidence/ledger.jsonl\n"))
+    print(R.dim("  diario             .harness/evidence/ledger.jsonl\n"))
     return launch(sp)
 
 
@@ -1487,7 +1779,6 @@ def _prompt_of(role, workspace, goal: str = ""):
 
 
 def cmd_run(opts) -> int:
-    from core.evidence import write_run
     from core.run import execute_step, finish, plan as plan_run
 
     ws = _ws(opts)
@@ -1563,10 +1854,12 @@ def cmd_status(opts) -> int:
     # respondía «no hay ninguna ejecución registrada» justo después de un `verify` que sí
     # había dejado evidencia. Ver ADR-0012.
     ver = latest_verification(ws)
+    rojas_ver = 0
     if ver is None:
         print(R.dim("  última verificación   ninguna registrada"))
     elif ver.get("run_id"):
-        rojas = sum(1 for s in ver["gates"].values() if s in ("FAIL", "NOT_EXECUTABLE"))
+        rojas = rojas_ver = sum(1 for s in ver["gates"].values()
+                                if s in ("FAIL", "NOT_EXECUTABLE"))
         print(f"  última verificación   {ver['run_id']} · {R.bold(ver['verdict'])}")
         print(R.dim(f"                        {len(ver['gates'])} puertas · {rojas} en rojo · "
                     f"{ver['generated_at'][:19]}"))
@@ -1589,10 +1882,55 @@ def cmd_status(opts) -> int:
     for p, r in pend[:8]:
         print(R.dim(f"    {r.kind:<24} {r.subject}"))
     from core.memory import Memory
-    print(f"  memoria: " + " · ".join(f"{k}={v['count']}"
-                                      for k, v in Memory(ws).summary().items()))
+    memoria = {k: v["count"] for k, v in Memory(ws).summary().items()}
+    print("  memoria: " + " · ".join(f"{k}={v}" for k, v in memoria.items()))
+
+    # Qué toca después, por las tres fuentes que `status` ya mira.
+    siguientes: list = []
+    ilegibles = (ver or {}).get("unreadable", [])
+    for u in ilegibles:
+        siguientes.append(Siguiente(
+            why=f"evidencia ilegible en {u['path']}: {u['problem']}. «No pude leerlo» no es "
+                f"«no existe»: el estado queda sin determinar",
+            do="", who=PERSONA))
+    if ver is None:
+        siguientes.append(Siguiente(
+            why="no hay ninguna verificación registrada: nada afirma que este espacio cumpla",
+            do="refuto verify", who=MAQUINA))
+    elif rojas_ver:
+        siguientes.append(Siguiente(
+            why=f"la última verificación dejó {rojas_ver} puerta(s) sin aprobar "
+                f"({ver['verdict']})",
+            do="refuto verify", who=AGENTE))
+    for _p, r in pend:
+        siguientes.append(Siguiente(
+            why=f"revisión humana pendiente: {r.kind} sobre {r.subject}. Sin ella no se puede "
+                f"afirmar que alguien lo miró",
+            do="", who=PERSONA))
+    for d in (resumable(run)["drift"] if run is not None else []):
+        siguientes.append(Siguiente(why=f"deriva del entorno: {d}", do="refuto doctor",
+                                    who=PERSONA))
+
+    for s in siguientes[:8]:
+        print(R.paint(f"  → {s.why}", "33"))
+        if s.do:
+            print(R.dim(f"     hacer  {s.do}  ({s.who})"))
     print()
-    return EXIT_OK
+
+    # `INCONCLUSIVE` sólo cuando la evidencia no se pudo LEER: ahí `status` no está informando
+    # de un estado, está declarando que no lo sabe, y devolver 0 sería afirmar lo que no consta.
+    # En todo lo demás se conserva `PASS`: la orden informa bien, y lo pendiente viaja en `next`
+    # — cambiarlo rompería a quien encadena `refuto status && …`.
+    estado = INCONCLUSIVE if ilegibles else PASS
+    return responder(opts, command="status", status=estado, ws=ws, next=siguientes,
+                     payload={"schema": "harness.status/v1",
+                              "verification": ver,
+                              "orchestration": (run.to_dict()
+                                                if run is not None and hasattr(run, "to_dict")
+                                                else None),
+                              "human_reviews_pending": [{"kind": r.kind, "subject": r.subject}
+                                                        for _p, r in pend],
+                              "memory": memoria})
 
 
 # ── argumentos ───────────────────────────────────────────────────────────────────────
@@ -1645,6 +1983,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="qué hay en esta máquina y qué funciona de verdad")
     d.add_argument("--deep", action="store_true", help="incluye VERIFIED (gasta créditos)")
+    d.add_argument("--json", action="store_true", help=AYUDA_JSON)
     d.set_defaults(func=cmd_doctor)
 
     pr = sub.add_parser("probe", help="escalera de ejecutabilidad de los agentes")
@@ -1723,6 +2062,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="lleva este espacio a la versión del motor en disco")
     up.add_argument("--apply", action="store_true",
                     help="escribe. Sin esto muestra qué cambiaría y no toca nada.")
+    up.add_argument("--json", action="store_true", help=AYUDA_JSON)
     up.set_defaults(func=cmd_upgrade)
 
     v = sub.add_parser("verify", help="ejecuta las puertas y emite evidencia")
@@ -1755,7 +2095,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     m = sub.add_parser("mcp", help="integridad referencial de la cadena MCP")
     m.add_argument("--offline", action="store_true")
+    m.add_argument("--json", action="store_true", help=AYUDA_JSON)
     m.set_defaults(func=cmd_mcp)
+
+    ms = sub.add_parser("mcp-serve", help="sirve refuto por MCP stdio (sólo lectura)")
+    ms.set_defaults(func=cmd_mcp_serve)
 
     inv = sub.add_parser("inventory", help="inventario mecánico del conjunto de repositorios")
     inv.add_argument("--depth", type=int, default=3)
@@ -1824,6 +2168,7 @@ def build_parser() -> argparse.ArgumentParser:
     re_.set_defaults(func=cmd_resume)
 
     st = sub.add_parser("status", help="dónde está el trabajo y qué espera a una persona")
+    st.add_argument("--json", action="store_true", help=AYUDA_JSON)
     st.set_defaults(func=cmd_status)
 
     s = sub.add_parser("selftest", help="el juez se prueba a sí mismo")
@@ -1839,11 +2184,42 @@ def main(argv: list | None = None) -> int:
     force_utf8_io()
 
     opts = build_parser().parse_args(argv)
+    pidio_json = bool(getattr(opts, "json", False))
+
+    # Con `--json`, stdout lleva SÓLO el sobre. Es la mitad del protocolo que no se ve y sin la
+    # cual no sirve: `doctor` imprime veinte líneas de diagnóstico para una persona, y un
+    # consumidor que hace `json.load(stdout)` recibe «Expecting value: line 2 column 1».
+    #
+    # Se captura aquí y no se guarda `if not opts.json:` en cada `print` de las 24 órdenes por
+    # dos razones. La primera es que serían cientos de guardas y la que se olvide rompe el
+    # protocolo en silencio. La segunda es que así el texto humano NO se pierde: se reencamina a
+    # stderr, de modo que una persona que teclea `--json` en su terminal sigue viendo el
+    # diagnóstico y la máquina sigue leyendo stdout limpio.
+    buffer = io.StringIO()
     try:
-        return opts.func(opts)
+        if pidio_json:
+            with contextlib.redirect_stdout(buffer):
+                codigo = opts.func(opts)
+        else:
+            codigo = opts.func(opts)
     except KeyboardInterrupt:
+        sys.stderr.write(buffer.getvalue())
         print("\n  interrumpido", file=sys.stderr)
         return 130
+
+    # El único sitio que serializa. Si la orden declaró su respuesta con `responder`, el sobre
+    # manda: su código lo deriva el estado, no lo elige la orden.
+    sobre = getattr(opts, "_sobre", None)
+    if pidio_json and sobre is not None:
+        sys.stderr.write(buffer.getvalue())
+        print(json.dumps(sobre, ensure_ascii=False, indent=2))
+        return sobre["exit"]
+    # Una orden todavía sin migrar a `responder` se comporta EXACTAMENTE como antes: su salida
+    # vuelve a stdout tal cual, incluido el JSON que ya emitía por su cuenta. Esto es lo que
+    # hace que la migración pueda ser orden a orden sin romper a nadie por el camino.
+    if pidio_json:
+        sys.stdout.write(buffer.getvalue())
+    return codigo
 
 
 if __name__ == "__main__":
