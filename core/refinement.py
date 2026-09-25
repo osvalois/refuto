@@ -128,6 +128,10 @@ REGLAS = {
     # Lo que protege. Más siempre se puede; menos, nunca.
     "protected_paths": ACUMULA,
     "secret_read_deny": ACUMULA,
+    # Los nombres de variable con forma de credencial acumulan por el mismo motivo que las
+    # rutas: marcar de más cuesta una consulta a una persona, y marcar de menos cuesta el
+    # secreto. Y con la raíz NO vacía, `ACUMULA` no cae en la trampa de `REDUCE`.
+    "secret_env_deny": ACUMULA,
     "command_deny": ACUMULA,
     # `command_ask` acumula por el mismo motivo: retirar una consulta convierte en automática
     # una decisión que alguien reservó a una persona.

@@ -4,7 +4,8 @@
 decision: el guardián decide sobre (sujeto, objeto, operación); las capacidades por rol sólo
           aprietan y toda restricción declarada se aplica o se declara no observable con motivo
 date: 2026-09-25
-status: IMPLEMENTADA en las capas 1, 2 y 3 · capa 4 PROPUESTA, sin código
+status: IMPLEMENTADA en las capas 1, 2, 3 y 4 (parcial) · una pieza de la 4 declarada NO
+        IMPLEMENTABLE en esta frontera, con la medición que lo demuestra
 refina: ADR-0006 (política única compilada), ADR-0011 (fronteras de confianza),
         ADR-0013 (raíz de confianza y modelo de efectos), ADR-0014 (monotonía por cobertura)
 question: >
@@ -152,17 +153,38 @@ el atajo opaco sigue ahí. No se listan las caducadas ni las de otro host: prome
 no hay es el peor sitio donde hacerlo, porque lo que el informe dice se toma por cierto el resto
 de la sesión.
 
-### Capa 4 · Credenciales: mediar, no esconder *(propuesta, sin código)*
+### Capa 4 · La credencial que vive en una variable *(implementada en parte)*
 
-El modelo es hoy puramente negativo —no las leas, no las escribas— y no hay forma de **usar** una
-credencial legítimamente; de ahí sale el incentivo a rodear el control.
+Medido el 2026-09-25 en el entorno de una sesión gobernada real: **70 variables y 7 credenciales
+de verdad** —una clave de API de 164 caracteres, un token personal de GitHub, tres claves más y
+una contraseña—, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto
+en `$OPENAI_API_KEY`, libre.
 
-1. **Cerrar el entorno**: `env` pasa de `dict(os.environ)` a una lista de permitidas más lo que
-   la política declare. Mayor retorno por línea: hoy `printenv` es un `cat` de todos los secretos
-   de la máquina.
-2. **Referencia, no valor**: el agente pide `${secreto:NOMBRE}` y el motor lo resuelve en el punto
-   de ejecución, redactándolo del diario y de la salida.
-3. La no-exfiltración ya está en la Capa 1.
+**Lo implementado.** `secret_env_deny` (`ACUMULA`) compara el **nombre** de la variable, nunca el
+valor: mirar el valor de cada variable para decidir si es un secreto obligaría a leer todos los
+secretos para protegerlos. Se consulta en el MISMO canal de lectura que las rutas, porque
+`printenv OPENAI_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
+
+Y la vía a granel, que es la fácil: `env`, `printenv`, `set` no declaran ninguna lectura
+—`efectos("env").lecturas == set()`, no hay argumento que derivar— así que se enumeran. Sólo se
+pregunta si el entorno tiene de verdad alguna variable con forma de credencial: en una máquina
+limpia `env` es inofensivo y preguntarlo sería ruido. `env FOO=1 orden` no es un volcado.
+
+La curación de la lista ES el trabajo. Un sondeo con `SESSION|AUTH|KEY` marcaba `SSH_AUTH_SOCK`
+—la ruta de un socket, y quitarla rompe el agente de ssh—, `TERM_SESSION_ID` y
+`HARNESS_SESSION`, que es de refuto. Un detector que marca lo normal enseña a ignorarlo.
+
+**Lo NO implementable, y la medición que lo demuestra.** Este ADR proponía
+«`${secreto:NOMBRE}` resuelto en el punto de ejecución». **No se puede hacer aquí**, y no por
+coste: el contrato del guardián es `{allow, deny, ask}` en los seis runtimes
+(`core/guard.py:17-23`). Un gancho `PreToolUse` no reescribe la orden. refuto es un **monitor**
+en el canal de órdenes, no un ejecutor, así que no hay punto donde sustituir. Proponerlo fue un
+error mío de frontera: describí una capacidad de un ejecutor en el documento de un monitor.
+
+Lo que sí controla refuto es el entorno que ENTREGA, porque `core/session.py:1139` lanza al
+agente con `subprocess.call(..., env=env)`. Filtrar ahí es implementable y queda propuesto: se
+deja fuera de esta tanda porque retirar una variable puede romper una sesión que la necesita, y
+ese riesgo lo decide quien opera el espacio, no yo.
 
 ## Alternativas consideradas
 

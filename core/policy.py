@@ -124,6 +124,31 @@ DEFAULT_SECRET_READ_DENY = (
     "**/auth.json", "**/.aws/credentials",
 )
 
+#: Nombres de variable de entorno con forma de credencial. Se comparan contra el NOMBRE, nunca
+#: contra el valor: mirar el valor de cada variable para decidir si es un secreto obligaría a
+#: leer todos los secretos para protegerlos.
+#:
+#: Por qué hacía falta, medido el 2026-09-25 en el entorno de una sesión gobernada real: **70
+#: variables, 7 credenciales de verdad** —`OPENAI_API_KEY` de 164 caracteres,
+#: `GITHUB_PERSONAL_ACCESS_TOKEN`, `HALCON_ADMIN_API_KEY`, tres claves de API más y una
+#: contraseña—, todas legibles con un `printenv`. Asimetría neta: `.env` protegido contra
+#: escritura y el mismo secreto en una variable, libre.
+#:
+#: La lista está CURADA, y la curación es el trabajo. Un sondeo con `SESSION|AUTH|KEY` marcaba
+#: además `SSH_AUTH_SOCK` —que es la ruta de un socket, no un secreto, y quitarla rompe el agente
+#: de ssh—, `TERM_SESSION_ID`, `SECURITYSESSIONID` y `HARNESS_SESSION`, que es de refuto. Un
+#: detector que marca lo que no es enseña a ignorarlo, y entonces deja de proteger de lo que sí.
+#: Por eso se enumeran sufijos y familias concretas en vez de subcadenas sueltas.
+DEFAULT_SECRET_ENV_DENY = (
+    "*_API_KEY", "*_APIKEY", "*_SECRET", "*_SECRET_KEY", "*_ACCESS_KEY",
+    "*_ACCESS_TOKEN", "*_AUTH_TOKEN", "*_BEARER_TOKEN", "*_PRIVATE_KEY",
+    "*_PASSWORD", "*_PASSWD", "*_PASSPHRASE", "*_CREDENTIALS",
+    "*_TOKEN", "TOKEN", "PASSWORD", "SECRET",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+    "GITLAB_TOKEN", "NPM_TOKEN", "PYPI_TOKEN", "DOCKER_PASSWORD",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY",
+)
+
 #: Órdenes que nunca se ejecutan. Cada una corresponde a una forma de perder trabajo o datos.
 DEFAULT_COMMAND_DENY = (
     "rm -rf:*", "rm -fr:*", "rm -Rf:*", "rm --recursive --force:*",
@@ -176,6 +201,10 @@ class Policy:
     #: Lo único escribible fuera del espacio. Vacío significa: nada.
     external_write_allow: tuple = DEFAULT_EXTERNAL_WRITE
     secret_read_deny: tuple = DEFAULT_SECRET_READ_DENY
+    #: Nombres de variable de entorno con forma de credencial. Se consultan en el MISMO canal
+    #: de lectura que `secret_read_deny`: `printenv X` y `cat .env` son la misma pregunta por
+    #: dos caminos, y tratarlas distinto es cómo se queda uno de los dos sin mirar.
+    secret_env_deny: tuple = DEFAULT_SECRET_ENV_DENY
     command_deny: tuple = DEFAULT_COMMAND_DENY
     command_ask: tuple = DEFAULT_COMMAND_ASK
     #: Bloquea la escritura si el contenido contiene un secreto reconocible.
@@ -253,6 +282,21 @@ class Policy:
                 if fnmatch.fnmatch(target, raiz) or target == raiz \
                         or target.startswith(raiz + "/"):
                     return pattern
+        return ""
+
+    def is_secret_env(self, nombre: str) -> str:
+        """El patrón que marca ese NOMBRE de variable como credencial, o cadena vacía.
+
+        Sin normalizar la ruta —no es una ruta— y sin mirar el valor. La comparación es
+        insensible a mayúsculas porque un entorno real mezcla `GITHUB_TOKEN` y `github_token`,
+        y un control que distingue por capitalización no controla nada.
+        """
+        n = (nombre or "").strip().upper()
+        if not n:
+            return ""
+        for pattern in self.secret_env_deny:
+            if fnmatch.fnmatch(n, pattern.upper()):
+                return pattern
         return ""
 
     def is_secret_path(self, rel_path: str) -> str:
@@ -493,7 +537,39 @@ def _sale_del_espacio(ws: Path, destino: str) -> bool:
         return True
 
 
-def _lecturas_secretas(policy: Policy, ws: Path, lecturas) -> list:
+#: Órdenes que vuelcan el entorno ENTERO, sin nombrar ninguna variable. Se enumeran a mano
+#: porque no hay forma de derivarlo: `env` sin argumentos no tiene argumento que analizar.
+#:
+#: `env VAR=x orden` NO vuelca nada —usa `env` como envoltorio— y por eso se exige que la orden
+#: no lleve más que banderas. Marcarla sería marcar la mitad de los lanzamientos con entorno
+#: ajustado, y un detector que marca lo normal enseña a ignorarlo.
+_VUELCA_ENTORNO = {"env", "printenv", "set", "export", "declare"}
+
+
+def _vuelca_el_entorno(orden: str) -> bool:
+    """¿Alguno de los segmentos de la orden imprime el entorno completo?"""
+    for seg in _segmentos(orden or ""):
+        t = seg.split()
+        if not t or t[0] not in _VUELCA_ENTORNO:
+            continue
+        resto = []
+        for x in t[1:]:
+            # La redirección y sus destinos no son argumentos de `env`: son de la shell. Sin
+            # cortar aquí, `env > /tmp/claude-x/todo` no se veía como volcado —`>` no empieza por
+            # `-`— y salía `allow`, que es exactamente el volcado del entorno entero a un fichero
+            # que la política abre. La vía más fácil de todas, y la última en cerrarse.
+            if x in (">", ">>", "|", "2>", "&>", "1>") or x.startswith(">"):
+                break
+            if x != "-":
+                resto.append(x)
+        # Sólo banderas (`printenv -0`, `declare -p`) sigue siendo un volcado; un nombre de
+        # variable o una asignación, no: eso ya lo cubre la comparación por nombre.
+        if all(x.startswith("-") for x in resto):
+            return True
+    return False
+
+
+def _lecturas_secretas(policy: Policy, ws: Path, lecturas, orden_cruda: str = "") -> list:
     """Las lecturas de la orden que exponen una ruta de credencial: `[(ruta, patrón)]`.
 
     Dos niveles, y el segundo es donde está el matiz
@@ -522,12 +598,39 @@ def _lecturas_secretas(policy: Policy, ws: Path, lecturas) -> list:
     Incompleta y sólida: lo que afirma, lo afirma. Ante la duda no inventa una coincidencia.
     """
     fuera = []
+    # Un volcado del entorno ENTERO. `printenv OPENAI_API_KEY` se atrapa por el nombre, y `env` a
+    # secas no declara ninguna lectura —medido: `efectos("env").lecturas == set()`— porque no hay
+    # argumento que derivar. Es la vía más fácil de las dos, así que cerrar sólo la nombrada
+    # habría sido cerrar la puerta y dejar la ventana.
+    #
+    # Se mira si el entorno de ESTA sesión tiene de verdad alguna variable con forma de
+    # credencial. En una máquina sin ninguna, `env` es inofensivo y preguntarlo sería ruido — y
+    # un control ruidoso se desactiva. Medido el 2026-09-25 en una sesión real: 70 variables, 7
+    # credenciales.
+    if _vuelca_el_entorno(orden_cruda):
+        expuestas = sorted(n for n in os.environ if policy.is_secret_env(n))
+        if expuestas:
+            fuera.append((f"el entorno entero ({len(expuestas)} variables con forma de "
+                          f"credencial: {', '.join(expuestas[:4])}"
+                          f"{'…' if len(expuestas) > 4 else ''})",
+                          "secret_env_deny"))
     for lectura in sorted(lecturas or ()):
         if not lectura or lectura in ("-", "*"):
             continue
         patron = policy.is_secret_path(lectura)
         if patron:
             fuera.append((lectura, patron))
+            continue
+        # Una variable de ENTORNO con forma de credencial. `printenv OPENAI_API_KEY` y
+        # `cat .env` son la misma pregunta por dos caminos, y tratarlas distinto es cómo se
+        # queda uno de los dos sin mirar. Medido el 2026-09-25 en una sesión real: 70 variables
+        # y 7 credenciales de verdad, todas legibles, mientras `.env` estaba protegido.
+        #
+        # Se compara el NOMBRE. Mirar el valor para decidir si es un secreto obligaría a leer
+        # todos los secretos para protegerlos.
+        patron_env = policy.is_secret_env(lectura)
+        if patron_env:
+            fuera.append((f"${lectura}", patron_env))
             continue
         # Nivel 2: ¿es un directorio cuyo contenido inmediato incluye una credencial?
         try:
@@ -953,7 +1056,7 @@ def decide_command(policy: Policy, command: str, workspace: Path | None = None) 
     # legítimo a menudo, y un rechazo duro se rodea en un día con `python3 -c` —que es opaco—.
     # Entonces el canal deja de mirarse, que es peor que mirarlo y preguntar. El mismo patrón se
     # midió dos veces en este repositorio con `_partir` y con `dd:*`.
-    lecturas_secretas = _lecturas_secretas(policy, ws, ef.lecturas)
+    lecturas_secretas = _lecturas_secretas(policy, ws, ef.lecturas, command)
     marca = {"opaco": ef.opaco, "motivo_opaco": ef.motivo_opaco,
              "escrituras": tuple(sorted(ef.escrituras))}
     if lecturas_secretas:

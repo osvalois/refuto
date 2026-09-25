@@ -148,6 +148,39 @@ contención de directorios es de un nivel (medido: 0,08 ms una lectura simple, 2
 entradas); y el entorno se sigue heredando entero, que es la Capa 4 y está propuesta sin código.
 Diseño completo, alternativas descartadas y tradeoffs: ADR-0016.
 
+**Añadido — la credencial que vive en una variable, no en un fichero** (2026-09-25)
+
+Medido en el entorno de una sesión gobernada real: **70 variables y 7 credenciales de verdad** —
+una clave de API de 164 caracteres, un token personal de GitHub, tres claves más y una
+contraseña—, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto en
+`$OPENAI_API_KEY`, libre.
+
+- **`secret_env_deny`** (`ACUMULA`) compara el **nombre** de la variable, nunca el valor: mirar el
+  valor de cada una para decidir si es un secreto obligaría a leer todos los secretos para
+  protegerlos. Se consulta en el MISMO canal de lectura que las rutas, porque
+  `printenv OPENAI_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
+- **La vía a granel, que es la fácil.** `env`, `printenv`, `set` no declaran ninguna lectura
+  —`efectos("env").lecturas == set()`, no hay argumento que derivar— así que se enumeran. Sólo se
+  pregunta si el entorno tiene de verdad alguna variable con forma de credencial: en una máquina
+  limpia `env` es inofensivo y preguntarlo sería ruido. `env FOO=1 orden` no es un volcado. Y
+  `env > /tmp/claude-x/todo` es `deny`: la redirección rompía la comprobación de «sólo banderas»
+  y salía `allow`, que era el volcado del entorno entero a un fichero que la política abre.
+- **La curación de la lista ES el trabajo.** Un sondeo con `SESSION|AUTH|KEY` marcaba
+  `SSH_AUTH_SOCK` —la ruta de un socket, y quitarla rompe el agente de ssh—, `TERM_SESSION_ID` y
+  `HARNESS_SESSION`, que es de refuto. Un detector que marca lo normal enseña a ignorarlo, y
+  entonces deja de proteger de lo que sí.
+
+**Corregido en ADR-0016 — una pieza que yo mismo propuse y NO es implementable** (2026-09-25)
+
+El ADR proponía «`${secreto:NOMBRE}` resuelto en el punto de ejecución». No se puede hacer aquí, y
+no por coste: el contrato del guardián es `{allow, deny, ask}` en los seis runtimes
+(`core/guard.py:17-23`) y un gancho `PreToolUse` **no reescribe la orden**. refuto es un monitor
+en el canal de órdenes, no un ejecutor, así que no hay punto donde sustituir. Fue un error de
+frontera: describí una capacidad de un ejecutor en el documento de un monitor. Lo que sí controla
+refuto es el entorno que ENTREGA —`core/session.py` lanza al agente con `env=`— y eso queda
+propuesto, porque retirar una variable puede romper una sesión que la necesita y ese riesgo lo
+decide quien opera el espacio.
+
 **Añadido — `scripts/preflight.py`, un solo sitio donde consta qué hay que cumplir** (2026-09-25)
 
 - **13 controles con el vocabulario de seis estados** y la regla que los ordena: **una

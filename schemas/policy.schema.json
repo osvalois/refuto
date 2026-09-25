@@ -55,7 +55,12 @@
       "items": {
         "type": "string"
       },
-      "description": "Rutas cuya LECTURA se deniega. ACUMULA por herencia."
+      "description": "Rutas cuya LECTURA se deniega. ACUMULA por herencia. Hasta el 2026-09-25 se aplicaba sólo en decide_write (escrituras) y en la capa compilada del agente (sobre Read); el guardián engancha Bash y no preguntaba por lecturas, así que `cat .env` salía allow. Ahora el canal de lectura sí se mira: leer una credencial es `ask` —un deny duro se rodea con `python3 -c`, que es opaco, y entonces el canal deja de mirarse— y la COMBINACIÓN lectura-de-credencial + escritura-fuera-del-espacio es `deny`."
+    },
+    "secret_env_deny": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Nombres de variable de ENTORNO con forma de credencial, con globs e insensible a mayúsculas. ACUMULA por herencia: marcar de más cuesta una consulta a una persona, marcar de menos cuesta el secreto. Se compara el NOMBRE, nunca el valor — mirar el valor de cada variable para decidir si es un secreto obligaría a leer todos los secretos para protegerlos. Se consulta en el MISMO canal de lectura que secret_read_deny, porque `printenv OPENAI_API_KEY` y `cat .env` son la misma pregunta por dos caminos. Medido el 2026-09-25 en una sesión real: 70 variables y 7 credenciales de verdad, todas legibles, mientras .env estaba protegido. La lista de fábrica está CURADA: un sondeo con SESSION|AUTH|KEY marcaba SSH_AUTH_SOCK —que es la ruta de un socket— y HARNESS_SESSION, que es de refuto; un detector que marca lo normal enseña a ignorarlo."
     },
     "command_deny": {
       "type": "array",
