@@ -20,7 +20,11 @@ Qué se fija aquí, y por qué cada mitad hace falta
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parents[2]
 
 from core.envelope import (AGENTE, EXIGEN_SIGUIENTE, EXIT_BLOCKED, EXIT_FAIL, EXIT_OK, MAQUINA,
                            PERSONA, QUIENES, SCHEMA, Siguiente, envelope, exit_for)
@@ -170,6 +174,54 @@ class TestLosSobresRealesValidanContraElEsquemaPublicado(unittest.TestCase):
         esquema = load_schema("envelope.schema.json")
         turnos = esquema["$defs"]["siguiente"]["properties"]["who"]["enum"]
         self.assertEqual(set(QUIENES), set(turnos))
+
+
+class TestConJsonStdoutLlevaSoloElSobre(unittest.TestCase):
+    """La mitad del protocolo que no se ve, y sin la cual no sirve.
+
+    Se midió dos veces el mismo defecto en dos días, y la segunda con el arreglo de la primera
+    ya escrito:
+
+        2026-09-24  `refuto doctor --json` mezclaba 20 líneas de diagnóstico con el sobre.
+                    `json.load(stdout)` → «Expecting value: line 2 column 1».
+        2026-09-25  `scripts/preflight.py --json` hacía exactamente lo mismo, y lo encontró el
+                    trabajo de CI que ejecuta el preflight: rc=0, preflight en verde, y el paso
+                    siguiente reventando al parsear.
+
+    Dos veces es un patrón, y un patrón se fija con una prueba y no con un comentario. Esto
+    recorre las superficies `--json` como las recorre un consumidor: por subproceso, leyendo
+    stdout y nada más.
+    """
+
+    def _stdout_de(self, argv: list) -> str:
+        import subprocess
+        import sys as _sys
+
+        from core.proc import TEXT_IO
+
+        p = subprocess.run([_sys.executable, *argv], cwd=RAIZ, capture_output=True,
+                           timeout=600, **TEXT_IO)
+        return p.stdout or ""
+
+    def test_una_orden_de_refuto_emite_json_puro(self):
+        crudo = self._stdout_de(["refuto.py", "status", "--json"])
+        sobre = json.loads(crudo)                     # revienta si se colara texto humano
+        self.assertEqual(SCHEMA, sobre["schema"])
+
+    def test_el_preflight_emite_json_puro(self):
+        # Se excluye lo caro: lo que esta prueba fija es el CANAL, no el veredicto.
+        crudo = self._stdout_de(["scripts/preflight.py", "--solo", "esquemas", "--json"])
+        sobre = json.loads(crudo)
+        self.assertEqual(SCHEMA, sobre["schema"])
+        self.assertEqual("preflight", sobre["command"])
+
+    def test_y_el_sobre_de_cada_superficie_valida(self):
+        esquema = load_schema("envelope.schema.json")
+        for argv in (["refuto.py", "status", "--json"],
+                     ["scripts/preflight.py", "--solo", "esquemas", "--json"]):
+            with self.subTest(argv=argv[0]):
+                sobre = json.loads(self._stdout_de(argv))
+                self.assertEqual([], validate(sobre, esquema))
 
 
 if __name__ == "__main__":

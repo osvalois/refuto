@@ -278,6 +278,13 @@ def main(argv=None) -> int:
     omitidos = sorted(c.nombre for c in chequeos if c.nombre in set(opts.excepto))
     chequeos = [c for c in chequeos if c.nombre not in set(opts.excepto)]
 
+    # Con `--json`, stdout lleva SÓLO el sobre y el texto humano se reencamina a stderr. Es la
+    # misma regla que `refuto.main`, y hacía falta recordarla aquí: la primera versión imprimía
+    # las dos cosas en stdout y CI se cayó parseando `preflight.json` —«Expecting value: line 2
+    # column 3»— con el preflight en verde. El defecto que este guion existe para adelantar, en
+    # el propio guion, encontrado por el trabajo de CI que lo ejecuta.
+    voz = sys.stderr if opts.json else sys.stdout
+
     if not chequeos:
         # Ámbito vacío. No aprueba: es la regla que este programa existe para aplicar.
         sobre = envelope(command="preflight", status=BLOCKED, workspace=RAIZ,
@@ -289,15 +296,15 @@ def main(argv=None) -> int:
         _emitir(sobre, opts.json)
         return sobre["exit"]
 
-    print("\n  preflight")
+    print("\n  preflight", file=voz)
     resultados = []
     for ch in chequeos:
-        print(f"    · {ch.nombre} …", end="", flush=True)
+        print(f"    · {ch.nombre} …", end="", flush=True, file=voz)
         r = _ejecutar(ch)
         resultados.append(r)
         marca = {PASS: "✓", FAIL: "✗", BLOCKED: "⊘"}.get(r["status"], "?")
         print(f"\r    {marca} {r['nombre']:<14} {r['status']:<8} {r['ms']:>6} ms"
-              f"   {r['detalle'][:80]}")
+              f"   {r['detalle'][:80]}", file=voz)
 
     por_nombre = {c.nombre: c for c in chequeos}
     siguientes, rojos_bloqueantes = [], []
@@ -335,19 +342,19 @@ def main(argv=None) -> int:
     else:
         estado = BLOCKED
 
-    print()
+    print(file=voz)
     if estado == PASS:
         info = [r for r in resultados if r["status"] != PASS]
         print(f"    ✓ preflight PASS · {len(resultados)} controles"
-              + (f" · {len(info)} informativo(s) con hallazgos" if info else ""))
+              + (f" · {len(info)} informativo(s) con hallazgos" if info else ""), file=voz)
     else:
         print(f"    ✗ preflight {estado} · {len(rojos_bloqueantes)} control(es) bloqueante(s) "
-              f"sin aprobar")
+              f"sin aprobar", file=voz)
     for s in siguientes:
-        print(f"      → {s.why}")
+        print(f"      → {s.why}", file=voz)
         if s.do:
-            print(f"         hacer  {s.do}  ({s.who})")
-    print()
+            print(f"         hacer  {s.do}  ({s.who})", file=voz)
+    print(file=voz)
 
     sobre = envelope(command="preflight", status=estado, workspace=RAIZ,
                      provenance=provenance(RAIZ), next=siguientes,
