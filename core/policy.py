@@ -183,6 +183,18 @@ class Policy:
     #: Reglas de red. Hoy vacío: ninguno de los cinco runtimes ofrece allowlist de dominios
     #: verificada, y declarar una regla que no se aplica es peor que no tenerla.
     network_rules: tuple = ()
+    #: Restricciones EXTRA por rol, sobre las que ya declara `roles/registry.json`.
+    #:
+    #: El registro es la fuente canónica —un rol es lo que su contrato dice que es— y esto sólo
+    #: APRIETA: el efectivo es la unión (`core.capabilities.capacidades_de`). Un espacio que
+    #: quiera que su `backend-engineer` tampoco use la shell lo declara aquí; uno que quiera lo
+    #: contrario **no tiene sintaxis para decirlo**, y ése es el punto — no poder expresar la
+    #: relajación es más fuerte que detectarla, igual que en `protected_paths`.
+    #:
+    #: Los nombres válidos son los de `core.capabilities.CONOCIDAS`. Uno inventado no se ignora
+    #: en silencio: `G-CAPABILITY` lo pone en rojo, porque una capacidad que nadie aplica es
+    #: exactamente el defecto que ese gate existe para impedir.
+    role_capabilities: dict = field(default_factory=dict)
     #: Modo por defecto por runtime. No se homogeneiza: cada uno tiene su vocabulario.
     default_modes: dict = field(default_factory=lambda: {
         "claude": "acceptEdits", "kiro": "declared-in-agent", "gemini": "default",
@@ -452,6 +464,78 @@ class Decision:
     @property
     def blocked(self) -> bool:
         return self.outcome == DENY
+
+
+def _sale_del_espacio(ws: Path, destino: str) -> bool:
+    """¿Esa escritura aterriza fuera del espacio de trabajo?
+
+    Se resuelve antes de comparar, igual que en `decide_write`: un enlace simbólico dentro del
+    árbol que apunta afuera sale igual, y preguntarlo sobre la cadena tal como la escribió el
+    agente sería preguntarlo sobre la intención en vez de sobre el efecto.
+    """
+    try:
+        raw = Path(destino).expanduser()
+        absoluta = raw if raw.is_absolute() else (ws / raw)
+        Path(os.path.realpath(absoluta)).relative_to(ws.resolve())
+        return False
+    except (ValueError, OSError):
+        return True
+
+
+def _lecturas_secretas(policy: Policy, ws: Path, lecturas) -> list:
+    """Las lecturas de la orden que exponen una ruta de credencial: `[(ruta, patrón)]`.
+
+    Dos niveles, y el segundo es donde está el matiz
+    ------------------------------------------------
+    1. **Coincidencia directa.** La lectura casa con un patrón de `secret_read_deny`. Cubre
+       `cat .env`, `head secrets/clave.pem`, `cp ~/.aws/credentials …`.
+    2. **Lectura de directorio.** `grep -rn AKIA .` no lee `.env`: lee `.`, y ningún patrón de
+       ruta casa con `.`. Medido el 2026-09-25:
+
+           grep -rn AKIA .  →  lecturas={'.', 'AKIA'}  ·  is_secret_path('.') = False
+
+       Así que se mira si ese directorio CONTIENE, en su primer nivel, un fichero que case. Un
+       nivel y no recursivo a propósito: recorrer el árbol entero en cada decisión del guardián
+       lo volvería lento justo en el camino caliente, y un control lento se desactiva.
+
+    Lo que esta función NO cubre, y se declara en vez de fingirse
+    -------------------------------------------------------------
+    - Una credencial ANIDADA bajo un directorio que se lee recursivamente (`sub/dir/.env` con
+      `grep -r .`) no se detecta. Es incompleta, como `Ê ⊆ Effects`.
+    - `tar czf t.tgz .` sale `opaco` del modelo de efectos: no declara lecturas, así que aquí no
+      hay nada que mirar. La decisión llevará `opaco=True` y el diario lo registra.
+    - Una credencial en el ENTORNO (`printenv AWS_SECRET_ACCESS_KEY`) no es una ruta y no la ve
+      esto. Hoy el agente hereda `os.environ` completo (`core/session.py`), así que el entorno es
+      el hueco grande que queda — y es otra capa, no un olvido de ésta.
+
+    Incompleta y sólida: lo que afirma, lo afirma. Ante la duda no inventa una coincidencia.
+    """
+    fuera = []
+    for lectura in sorted(lecturas or ()):
+        if not lectura or lectura in ("-", "*"):
+            continue
+        patron = policy.is_secret_path(lectura)
+        if patron:
+            fuera.append((lectura, patron))
+            continue
+        # Nivel 2: ¿es un directorio cuyo contenido inmediato incluye una credencial?
+        try:
+            raw = Path(lectura).expanduser()
+            base = raw if raw.is_absolute() else (ws / raw)
+            if not base.is_dir():
+                continue
+            for hijo in sorted(base.iterdir()):
+                try:
+                    rel = str(hijo.resolve().relative_to(ws.resolve()))
+                except ValueError:
+                    rel = hijo.name
+                p2 = policy.is_secret_path(rel) or policy.is_secret_path(hijo.name)
+                if p2:
+                    fuera.append((f"{lectura} (contiene {hijo.name})", p2))
+                    break
+        except (OSError, ValueError):
+            continue        # no se pudo mirar: no se inventa una coincidencia
+    return fuera
 
 
 def _motivo_protegida(rel: str, pattern: str, existe: bool) -> str:
@@ -823,18 +907,67 @@ def decide_command(policy: Policy, command: str, workspace: Path | None = None) 
     """
     from core.effects import efectos
 
+    ws = workspace or Path.cwd()
     ef = efectos(command)
     for destino in sorted(ef.escrituras):
-        d = decide_write(policy, workspace or Path.cwd(), destino)
+        d = decide_write(policy, ws, destino)
         if d.outcome == DENY:
             return Decision(DENY, rule=d.rule,
                             reason=f"la orden escribe en «{destino}», y {d.reason}",
                             opaco=ef.opaco, motivo_opaco=ef.motivo_opaco,
                             escrituras=tuple(sorted(ef.escrituras)))
 
-    segmentos = _segmentos(command) or [" ".join(command.split())]
+    # ── el canal de LECTURA, que estaba sin mirar ────────────────────────────────────
+    #
+    # El defecto que esto cierra, medido el 2026-09-25 con el guardián real y la política de
+    # fábrica:
+    #
+    #     Write  .env                  →  deny   («**/.env»)
+    #     Bash   cat .env              →  ALLOW
+    #     Bash   cp .env /tmp/claude-x/robado                      →  ALLOW
+    #     Bash   cp .env ~/.claude/projects/p/memory/nota.md       →  ALLOW  ← sobrevive la sesión
+    #
+    # `secret_read_deny` se aplicaba en dos sitios y ninguno era el guardián sobre `Bash`:
+    # `decide_write` (que gobierna ESCRITURAS) y `adapters/claude.py`, que lo compila a
+    # `Read(**/.env)` en la capa de permisos del agente. `core/wire.py` declara que `Read` no se
+    # engancha a propósito —denegaría leer `.harness/**`, que el agente necesita— y esa decisión
+    # sigue siendo correcta; lo que faltaba es preguntar por las lecturas en el canal que SÍ
+    # está enganchado. Es exactamente el defecto que `core/wire.py` documenta haber arreglado
+    # para escrituras: «una orden cualquiera por Bash rodeaba el control entero».
+    #
+    # Y el dato ya estaba: `Efectos.lecturas` se pobla desde siempre y `decide_command` tenía
+    # tres referencias a `escrituras` y cero a `lecturas`. Se calculaba y se descartaba.
+    #
+    # `ask` y no `deny`, y la razón es operativa: leer un `.env` para depurar configuración es
+    # legítimo a menudo, y un rechazo duro se rodea en un día con `python3 -c` —que es opaco—.
+    # Entonces el canal deja de mirarse, que es peor que mirarlo y preguntar. El mismo patrón se
+    # midió dos veces en este repositorio con `_partir` y con `dd:*`.
+    lecturas_secretas = _lecturas_secretas(policy, ws, ef.lecturas)
     marca = {"opaco": ef.opaco, "motivo_opaco": ef.motivo_opaco,
              "escrituras": tuple(sorted(ef.escrituras))}
+    if lecturas_secretas:
+        ruta, patron = lecturas_secretas[0]
+        # La COMBINACIÓN sí se deniega: leer una credencial Y escribir fuera del espacio en la
+        # misma orden no tiene lectura legítima — es exfiltración, y da igual que el destino sea
+        # una ruta que la política abre a propósito. `external_write_allow` existe para el
+        # cuaderno y la memoria del agente, no para que un secreto sobreviva a la sesión.
+        fuera = [d for d in sorted(ef.escrituras) if _sale_del_espacio(ws, d)]
+        if fuera:
+            return Decision(DENY, rule=f"{patron} → fuera-del-espacio",
+                            reason=f"la orden LEE «{ruta}» (credencial, por «{patron}») y ESCRIBE "
+                                   f"en «{fuera[0]}», fuera del espacio. Las dos cosas por "
+                                   f"separado pueden ser legítimas; juntas son exfiltración, y "
+                                   f"que el destino esté declarado escribible no lo cambia: "
+                                   f"`external_write_allow` abre el cuaderno del agente, no una "
+                                   f"salida para credenciales.", **marca)
+        return Decision(ASK, rule=patron,
+                        reason=f"la orden LEE «{ruta}», que coincide con «{patron}»: es una ruta "
+                               f"de credencial. Leerla puede ser legítimo —depurar una "
+                               f"configuración lo es— y por eso no se rechaza; lo decide una "
+                               f"persona. Si sólo necesita saber si la variable está definida, "
+                               f"compruebe su presencia sin volcar el valor.", **marca)
+
+    segmentos = _segmentos(command) or [" ".join(command.split())]
     peor_ask = None
     for cmd in segmentos:
         for pattern in policy.command_deny:

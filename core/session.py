@@ -1081,6 +1081,12 @@ def launch(sp: SessionPlan) -> int:
     env.setdefault("KIRO_TELEMETRY_OPT_OUT", "1")
     env["HARNESS_WORKSPACE"] = str(sp.workspace)
     env["HARNESS_RUN_ID"] = sp.run_id
+    # El SUJETO del monitor de referencia. Sin esto el guardián decide sobre
+    # `(objeto, operación)` y todo rol tiene autoridad idéntica — ver `core/capabilities.py`.
+    # Es una variable de entorno, luego el agente puede reescribirla en un subproceso: atenúa
+    # por rol DECLARADO, no por principal criptográfico, y así se declara.
+    if getattr(sp, "role", "") or getattr(sp, "rol", ""):
+        env["HARNESS_ROLE"] = str(getattr(sp, "role", "") or getattr(sp, "rol", ""))
     # La marca que lee el gancho `SessionStart` para saber si HAY alguien que vaya a devolver
     # la propiedad de los ficheros al salir (`core.wire.ROOT_WARN_CMD`). La pone quien de
     # verdad lo va a hacer —esta función—, y no un lanzador externo: así el aviso dice la

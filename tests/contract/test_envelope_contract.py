@@ -193,35 +193,44 @@ class TestConJsonStdoutLlevaSoloElSobre(unittest.TestCase):
     stdout y nada más.
     """
 
-    def _stdout_de(self, argv: list) -> str:
+    #: Las superficies se lanzan UNA vez para toda la clase. Cada lanzamiento es un proceso
+    #: completo de refuto, y la primera versión hacía seis para comprobar tres propiedades sobre
+    #: dos salidas: 55 pruebas de contrato pasaron a tardar 62 s, y una suite lenta se deja de
+    #: ejecutar. Lo que se fija es el CANAL, y el canal no cambia entre aserciones.
+    SUPERFICIES = {
+        "refuto": ["refuto.py", "status", "--json"],
+        # `--solo esquemas` es el control más barato del preflight: lo que se prueba aquí es que
+        # stdout lleve sólo el sobre, no el veredicto.
+        "preflight": ["scripts/preflight.py", "--solo", "esquemas", "--json"],
+    }
+
+    @classmethod
+    def setUpClass(cls):
         import subprocess
         import sys as _sys
 
         from core.proc import TEXT_IO
 
-        p = subprocess.run([_sys.executable, *argv], cwd=RAIZ, capture_output=True,
-                           timeout=600, **TEXT_IO)
-        return p.stdout or ""
+        cls.salidas = {}
+        for nombre, argv in cls.SUPERFICIES.items():
+            p = subprocess.run([_sys.executable, *argv], cwd=RAIZ, capture_output=True,
+                               timeout=600, **TEXT_IO)
+            cls.salidas[nombre] = p.stdout or ""
 
     def test_una_orden_de_refuto_emite_json_puro(self):
-        crudo = self._stdout_de(["refuto.py", "status", "--json"])
-        sobre = json.loads(crudo)                     # revienta si se colara texto humano
+        sobre = json.loads(self.salidas["refuto"])    # revienta si se colara texto humano
         self.assertEqual(SCHEMA, sobre["schema"])
 
     def test_el_preflight_emite_json_puro(self):
-        # Se excluye lo caro: lo que esta prueba fija es el CANAL, no el veredicto.
-        crudo = self._stdout_de(["scripts/preflight.py", "--solo", "esquemas", "--json"])
-        sobre = json.loads(crudo)
+        sobre = json.loads(self.salidas["preflight"])
         self.assertEqual(SCHEMA, sobre["schema"])
         self.assertEqual("preflight", sobre["command"])
 
     def test_y_el_sobre_de_cada_superficie_valida(self):
         esquema = load_schema("envelope.schema.json")
-        for argv in (["refuto.py", "status", "--json"],
-                     ["scripts/preflight.py", "--solo", "esquemas", "--json"]):
-            with self.subTest(argv=argv[0]):
-                sobre = json.loads(self._stdout_de(argv))
-                self.assertEqual([], validate(sobre, esquema))
+        for nombre, crudo in self.salidas.items():
+            with self.subTest(superficie=nombre):
+                self.assertEqual([], validate(json.loads(crudo), esquema))
 
 
 if __name__ == "__main__":

@@ -96,6 +96,14 @@ class Refinamiento:
 ACUMULA, REDUCE, ENDURECE, PROPIO = "acumula", "reduce", "endurece", "propio"
 #: `MODO`   diccionario runtime→modo: el hijo no puede poner un modo MÁS PERMISIVO que el padre.
 MODO = "modo"
+#: `ACUMULA_MAPA`  diccionario clave→conjunto: `ACUMULA` aplicado clave a clave.
+#:
+#: Hacía falta para `role_capabilities`, que es un mapa de rol a restricciones. La unión por
+#: clave conserva la propiedad que importa —el hijo añade y no puede retirar— y, como en
+#: `ACUMULA`, **no hay sintaxis para quitar**: retirar una restricción de un rol es
+#: inexpresable, no una violación a detectar. Tratarlo como `PROPIO` habría dejado que un
+#: proyecto vaciara las capacidades que su cliente impuso, en silencio y con un solo `{}`.
+ACUMULA_MAPA = "acumula_mapa"
 
 #: Orden de permisividad, de menos a más. Sólo se comparan modos que estén aquí.
 #:
@@ -135,6 +143,12 @@ REGLAS = {
     # la persona» — pero eso es comportamiento de Claude Code y aquí está `NOT_RUN`. La
     # reclasificación procede igual: lo que no se puede afirmar no se concede.
     "default_modes": MODO,
+
+    # El SUJETO. Las capacidades por rol sólo APRIETAN, y por eso acumulan clave a clave. Se
+    # expresan en negativo (`no_shell`) precisamente para que la unión sea la operación
+    # correcta: una lista de concesiones tendría que ser `REDUCE` y volvería a la trampa que
+    # documenta ADR-0014. Ver `core/capabilities.py`.
+    "role_capabilities": ACUMULA_MAPA,
 
     # Metadatos. No son política y por eso el hijo los fija: `schema` identifica el contrato
     # del documento y `version` la revisión de quien lo escribe. Que estén aquí y no
@@ -220,6 +234,21 @@ def _viola(campo: str, regla: str, padre, hijo) -> list:
                     f"Apagar una comprobación heredada es relajar."]
         return []
     p, h = set(padre or ()), set(hijo or ())
+    if regla == ACUMULA_MAPA:
+        # Como `ACUMULA` y por el mismo motivo: el efectivo es la unión por clave, así que
+        # retirar una restricción de un rol no es una violación detectable — es inexpresable.
+        # Lo único que se comprueba es la FORMA: un valor que no sea un mapa de listas no se
+        # puede unir, y aceptarlo dejaría el campo silenciosamente vacío.
+        if hijo is not None and not isinstance(hijo, dict):
+            return [f"`{campo}`: se esperaba un mapa de rol a restricciones y llegó un "
+                    f"{type(hijo).__name__}. Un valor que no se puede unir se aplicaría como "
+                    f"vacío, y un campo de restricción vacío por error de forma es el peor "
+                    f"modo de no tener control: el documento parece declararlo."]
+        for rol, v in (hijo or {}).items():
+            if not isinstance(v, (list, tuple)):
+                return [f"`{campo}[{rol}]`: se esperaba una lista de restricciones y llegó un "
+                        f"{type(v).__name__}."]
+        return []
     if regla == ACUMULA:
         # Nunca hay violación, y es deliberado: el efectivo es la UNIÓN, así que el hijo no
         # tiene forma de retirar nada. Relajar aquí no se detecta — es INEXPRESABLE.
@@ -340,7 +369,12 @@ def refinar(padre_doc: dict, hijo_doc: dict, *,
         if campo not in hijo_doc:
             continue
         violaciones += _viola(campo, regla, padre_eff.get(campo), hijo_doc.get(campo))
-        if regla == ACUMULA:
+        if regla == ACUMULA_MAPA:
+            fusion = {k: list(v) for k, v in (padre_eff.get(campo) or {}).items()}
+            for rol, v in (hijo_doc.get(campo) or {}).items():
+                fusion[rol] = sorted(set(fusion.get(rol, ())) | set(v or ()))
+            efectivo[campo] = {k: sorted(set(v)) for k, v in fusion.items()}
+        elif regla == ACUMULA:
             efectivo[campo] = sorted(set(padre_eff.get(campo) or ()) |
                                      set(hijo_doc.get(campo) or ()))
         elif regla == REDUCE:

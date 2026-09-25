@@ -88,6 +88,17 @@
         }
       },
       "additionalProperties": false
+    },
+    "role_capabilities": {
+      "type": "object",
+      "description": "El SUJETO del monitor de referencia: restricciones extra por rol, sobre las que ya declara roles/registry.json. Hasta el 2026-09-25 el guardián decidía sobre (objeto, operación) y ningún campo del hecho normalizado era el sujeto, así que todo agente en todo rol tenía autoridad idéntica. ACUMULA_MAPA por herencia: el efectivo es la unión clave a clave, de modo que un espacio puede restringir más un rol y NO tiene sintaxis para retirarle una restricción — no poder expresar la relajación es más fuerte que detectarla. Se expresan en negativo (`no_shell`) precisamente para que la unión sea la operación correcta. Los nombres válidos son los de core.capabilities.CONOCIDAS: las que el guardián aplica más las declaradas no observables con su motivo. Uno inventado no se ignora en silencio — G-ROLES lo pone en rojo, porque una capacidad que nadie aplica es el defecto que ese gate existe para impedir.",
+      "patternProperties": {
+        "^[a-z][a-z0-9-]*$": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

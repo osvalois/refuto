@@ -30,8 +30,12 @@ from core.schema import load_schema, validate
 
 REGISTRY = Path(__file__).resolve().parents[1] / "roles" / "registry.json"
 
-#: Restricciones reconocidas. Una restricción que refuto no sabe aplicar es una restricción
-#: que no existe, y declararla sería peor que no tenerla.
+#: El TEXTO de cada restricción, para el informe de sesión. Es un diccionario de prosa y nada
+#: más — quién las APLICA es `core/capabilities.py`, y esa distinción costó un defecto:
+#: `validate_registry` comprobaba contra esta tabla y su mensaje decía «restricción que refuto
+#: no sabe aplicar», de modo que «saber aplicar» significaba «tener una frase en español».
+#: Ahora se valida contra `capabilities.CONOCIDAS` y esta tabla sólo responde de que el agente
+#: pueda LEER por qué no puede hacer algo.
 KNOWN_CONSTRAINTS = {
     "no_write_code":                "no puede escribir en el producto",
     "no_shell":                     "no puede ejecutar órdenes",
@@ -108,6 +112,8 @@ def validate_registry(path: str = "") -> list:
     except (OSError, ValueError) as exc:
         return [f"{p.name}: ilegible — {exc}"]
 
+    from core.capabilities import CONOCIDAS
+
     problems = [f"{p.name}: {e}" for e in validate(doc, load_schema("roles.schema.json"))]
     ids = {r["id"] for r in doc.get("roles", [])}
     from gates.base import GATES
@@ -119,9 +125,30 @@ def validate_registry(path: str = "") -> list:
             problems.append(f"{rid}: declarado dos veces")
         seen.add(rid)
         for c in r.get("constraints", []):
-            if c not in KNOWN_CONSTRAINTS:
-                problems.append(f"{rid}: restricción «{c}» que refuto no sabe aplicar. "
-                                f"Una restricción que no se aplica es peor que no declararla.")
+            # Contra `core.capabilities.CONOCIDAS`, no contra `KNOWN_CONSTRAINTS`.
+            #
+            # El defecto que esto cierra, medido el 2026-09-25: esta comprobación miraba
+            # `KNOWN_CONSTRAINTS`, que es el **diccionario de prosa** con el que se redacta el
+            # informe de sesión (`core/session.py:753`). Es decir, «refuto no sabe aplicar»
+            # significaba «no tengo una frase en español para describirla». El umbral de
+            # `G-ROLES` dice «restricciones APLICABLES» y el mensaje de error dice «una
+            # restricción que no se aplica es peor que no declararla» — y lo que se verificaba
+            # era que estuviera descrita. La puerta decía lo correcto y medía lo de al lado, y
+            # aprobaba sobre 22 roles y 10 restricciones aplicadas por cero líneas de código.
+            #
+            # `CONOCIDAS` = las que el guardián APLICA ∪ las declaradas NO OBSERVABLES con su
+            # motivo escrito. Una tercera categoría —descrita y en ningún sitio— es la que
+            # existía, y ahora no se puede expresar sin poner esto en rojo.
+            if c not in CONOCIDAS:
+                problems.append(f"{rid}: restricción «{c}» que el guardián no aplica y que "
+                                f"tampoco está declarada no observable en "
+                                f"`core.capabilities.NO_OBSERVABLES`. Una restricción que sólo "
+                                f"se imprime en el informe de sesión es una petición al modelo, "
+                                f"no un control: se cita en las revisiones como si protegiera.")
+            elif c not in KNOWN_CONSTRAINTS:
+                problems.append(f"{rid}: restricción «{c}» sin texto en `KNOWN_CONSTRAINTS`. El "
+                                f"guardián la aplica y el informe de sesión no la puede "
+                                f"explicar, así que el agente la incumplirá sin saber por qué.")
         for h in r.get("handoff", []):
             if h not in ids:
                 problems.append(f"{rid}: entrega a «{h}», que no es un rol")

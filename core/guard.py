@@ -105,8 +105,26 @@ def normalize(runtime: str, payload: dict) -> dict:
         "content": _first(payload, shape["content"]),
         "command": _first(payload, shape["command"]),
         "cwd": _first(payload, shape["cwd"]),
+        # El sujeto. Ningún runtime lo trae en la carga del gancho, así que se lee del
+        # entorno, que es donde `refuto chat` lo deja. Vacío significa «sesión sin rol
+        # declarado», y entonces no hay capacidad que aplicar — no significa «sin límites»:
+        # la política general sigue rigiendo igual que antes de que existiera esto.
+        "role": os.environ.get("HARNESS_ROLE", ""),
         "structured_reply": shape["structured"],
     }
+
+
+def _capacidades(rol: str) -> tuple:
+    """Las capacidades del rol, o vacío si no se pueden determinar.
+
+    `try` ancho a propósito: el diario no puede caerse porque el registro de roles no se lea. Un
+    evento sin la lista es peor que uno con ella y mucho mejor que ninguno.
+    """
+    try:
+        from core.capabilities import capacidades_de
+        return capacidades_de(rol)
+    except Exception:                                                   # noqa: BLE001
+        return ()
 
 
 def evaluate(policy: Policy, workspace: Path, fact: dict):
@@ -132,12 +150,56 @@ def evaluate(policy: Policy, workspace: Path, fact: dict):
     if fact["path"]:
         decisiones.append((decide_write(policy, workspace, fact["path"], fact["content"]),
                            "write"))
+    # ── el SUJETO ────────────────────────────────────────────────────────────────────
+    #
+    # Se evalúa DESPUÉS de las rutas y las órdenes, y se compone con `max`, que es lo que hace
+    # que una capacidad sólo pueda APRETAR por construcción y no por disciplina de quien la
+    # escriba: nunca puede convertir un `deny` de la política general en un `allow`.
+    #
+    # Sin rol declarado no hay capacidad que aplicar, y eso NO significa «sin límites»: la
+    # política general rige igual que antes de que esto existiera.
+    if fact.get("role"):
+        decisiones.append((_decidir_capacidad(policy, workspace, fact), "capability"))
+
     if not decisiones:
         return Decision(ALLOW,
                         reason="la carga del gancho no trae ruta ni orden que evaluar"), "none"
     # Gana la más restrictiva: la herramienta ejecuta TODO lo que la carga declara.
     peor, kind = max(decisiones, key=lambda d: _ORDEN_DECISION[d[0].outcome])
     return peor, kind
+
+
+def _decidir_capacidad(policy: Policy, workspace: Path, fact: dict):
+    """El veredicto de las capacidades del rol sobre este hecho.
+
+    Reúne lo que el rol necesita saber —qué rutas toca el hecho y qué lecturas de credencial
+    lleva— y se lo pasa a `core.capabilities`, que es donde vive la tabla. La separación importa:
+    este módulo sabe traducir cargas de gancho y aquél sabe qué significa cada restricción.
+    """
+    from core.policy import Decision, _lecturas_secretas
+
+    rutas: list = []
+    lecturas: tuple = ()
+    if fact.get("path"):
+        rutas.append(fact["path"])
+    if fact.get("command"):
+        try:
+            from core.effects import efectos
+            ef = efectos(fact["command"])
+            rutas += sorted(ef.escrituras)
+            lecturas = tuple(_lecturas_secretas(policy, workspace, ef.lecturas))
+        except Exception:                                               # noqa: BLE001
+            pass        # no poder derivar efectos no concede nada: sólo deja de añadir motivos
+
+    from core.capabilities import decidir
+    motivo, restriccion = decidir(policy, fact["role"], fact, rutas=rutas,
+                                  lecturas_secretas=lecturas)
+    if not motivo:
+        return Decision(ALLOW, reason=f"ninguna capacidad de «{fact['role']}» lo impide")
+    return Decision(DENY, rule=f"rol:{fact['role']}/{restriccion}",
+                    reason=f"«{fact['role']}»: {motivo} Esta restricción la declara "
+                           f"`roles/registry.json` y hasta el 2026-09-25 sólo se imprimía en el "
+                           f"informe de sesión: ahora la aplica el guardián.")
 
 
 def _digest_de(policy) -> str:
@@ -178,6 +240,11 @@ def _emit_event(workspace: Path, fact: dict, decision, kind: str,
             "reason": decision.reason,
             "euid": euid(),
             "sudo_user": os.environ.get("SUDO_USER", ""),
+            # QUIÉN actuó. Sin esto el diario decía qué regla denegó y no a quién, así que
+            # una auditoría no podía responder «¿qué hizo el revisor adversarial?». 174
+            # decisiones registradas antes de esto y ninguna sabía el rol.
+            "role": fact.get("role", ""),
+            "role_capabilities": list(_capacidades(fact.get("role", ""))),
             # QUÉ política decidió esto. Sin el digest, un evento dice qué regla denegó pero
             # no de qué política efectiva salió — y con herencia esa pregunta pasa de ociosa a
             # central: la regla pudo venir del cliente, y el cliente pudo cambiar después.

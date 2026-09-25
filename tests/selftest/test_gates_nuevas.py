@@ -226,7 +226,12 @@ class TestGateRoles(GateCase):
             tmp = fh.name
         problems = validate_registry(tmp)
         os.unlink(tmp)
-        self.assertTrue(any("no sabe aplicar" in p for p in problems), problems)
+        # Se fija la PROPIEDAD —la restricción inventada se detecta y se nombra— y no el texto
+        # del mensaje. Fijaba la cadena «no sabe aplicar», y al corregir el criterio del 2026-09-25
+        # —de `KNOWN_CONSTRAINTS`, que es prosa, a `capabilities.CONOCIDAS`, que es aplicación—
+        # la prueba cayó teniendo el control MÁS fuerte que antes. Una prueba que se rompe al
+        # arreglar lo que vigila estaba fijando la implementación, no el contrato.
+        self.assertTrue(any("no_hacer_el_mal" in p for p in problems), problems)
 
     def test_negativo_traspaso_a_un_rol_inexistente(self):
         import tempfile
