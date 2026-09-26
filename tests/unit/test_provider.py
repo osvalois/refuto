@@ -137,7 +137,6 @@ class TestDeclaracionDelEspacio(unittest.TestCase):
     """
 
     def _ws(self, expect: str | None):
-        import json
         from tests.fixtures import Workspace
         ws = Workspace("prov-decl")
         ws.__enter__()

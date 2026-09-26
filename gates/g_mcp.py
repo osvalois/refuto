@@ -26,7 +26,7 @@ nunca es aprobado» y el código decía lo contrario; ahora coinciden.
 from __future__ import annotations
 
 from core.mcp import (
-    ServerReport, collect_required_refs, interrogate_http, interrogate_stdio, load_mcp_config,
+    collect_required_refs, interrogate_http, interrogate_stdio, load_mcp_config,
     parse_tool_ref,
 )
 from core.model import (

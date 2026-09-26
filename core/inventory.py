@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 from core.digest import sha256_file
@@ -182,7 +182,7 @@ def render_text(inv: dict, *, markdown: bool = False) -> str:
     b = (lambda s: f"**{s}**") if markdown else (lambda s: s)
     lines = []
     if markdown:
-        lines += [f"# Inventario del conjunto de repositorios", "",
+        lines += ["# Inventario del conjunto de repositorios", "",
                   f"Raíz: `{inv['root']}` · generado {inv['provenance']['generated_at']}", ""]
     lines.append(f"\n  {b('Totales')}")
     for key in ("workspaces", "agent_files", "agent_names", "skill_files", "skill_names",

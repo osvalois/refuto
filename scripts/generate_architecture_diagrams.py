@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import base64
 import html
-import os
 import re
-import sys
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET   # nosec B405 — sólo biblioteca estándar por ADR-0002;
+# `defusedxml` sería una dependencia. El vector de entidades se trata en el punto de parseo.
 from pathlib import Path
 
 # ── Iconos SVG Vectoriales (Base64) ──────────────────────────────────────────
@@ -891,7 +890,7 @@ def build_page_7_target(builder: DrawioBuilder):
         "• Orquesta timeouts y señales de proceso.",
         x=70, y=140, width=420, height=155, status="PLANNED", icon="terminal", stroke="#0284c7"
     )
-    t0_c2 = p.add_card(
+    p.add_card(
         "COMPILADOR DE POLÍTICA Y SONDAS",
         "• Lee <code>policy.json</code> (Única Fuente de Verdad).<br/>"
         "• Compila a esquemas nativos sin tocar el agente.<br/>"
@@ -925,7 +924,7 @@ def build_page_7_target(builder: DrawioBuilder):
         "• Puente compatible con spans de OpenTelemetry (OTel).",
         x=570, y=320, width=420, height=150, status="PLANNED", icon="activity", stroke="#d97706"
     )
-    t1_c3 = p.add_card(
+    p.add_card(
         "MOTOR DE REPLAY FORENSE",
         "• Reproduce fielmente corridas pasadas desde diario.<br/>"
         "• Diagnostica alucinaciones o derivas de comportamiento.<br/>"
@@ -1024,14 +1023,17 @@ def generate_all():
 
     # 1. Generación y Validación del Archivo Draw.io XML
     xml_content = builder.to_string()
-    ET.fromstring(xml_content)  # Validación de sintaxis XML estricta
+    # nosec B314 — el contenido lo acaba de generar `builder.to_string()` tres líneas arriba:
+    # no hay entrada ajena que pueda declarar entidades. El riesgo está en el guion que LEE
+    # ficheros del disco (`check_diagram_assurance.py`), y allí sí se rechaza el vector.
+    ET.fromstring(xml_content)  # nosec B314 — contenido autogenerado en esta función
     drawio_path.write_text(xml_content, encoding="utf-8", newline="\n")
     print(f"✓ Diagrama Draw.io generado: {drawio_path} ({len(xml_content)} bytes, {len(builder.pages)} páginas)")
 
     # 2. Exportación Vectorial SVG de Cada Página
     for p in builder.pages:
         svg_content = p.to_svg()
-        ET.fromstring(svg_content)  # Validación de sintaxis SVG estricta
+        ET.fromstring(svg_content)  # nosec B314 — contenido autogenerado por `p.to_svg()`
         svg_file = output_dir / f"{p.prefix}.svg"
         svg_file.write_text(svg_content, encoding="utf-8", newline="\n")
         print(f"  ✓ Exportada página vectorial: {svg_file.name} ({len(svg_content)} bytes)")

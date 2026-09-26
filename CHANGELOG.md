@@ -10,6 +10,173 @@ histórica no las conservó, se dice.
 
 ---
 
+## 0.4.1 — *sin publicar* · seis defectos que una revisión adversarial encontró en los controles
+
+Todo lo de abajo salió de auditar la rama `assurance/protocolo-tres-caras` el **2026-09-25**
+contra `69bcd6a`, con la suite en verde (748/748) y CI en verde sobre el commit exacto. Ninguno
+lo detectó una prueba: los seis estaban **en los controles**, que es donde un defecto no tiene
+quien lo mire.
+
+El patrón se repite y conviene nombrarlo: un mecanismo se escribe bien, y **lo que decide si
+funciona no se comprueba a sí mismo**. Una tabla que se consulta por orden y admite duplicados;
+una atestación que enumera extensiones; una cadena de huellas que asume que nadie escribe a la
+vez; un tier estático que afirma para siempre algo medido una vez.
+
+**Arreglado**
+
+- **`Ê` afirmaba «sé que no escribe» de tres intérpretes** (`core/effects.py`). `perl` estaba en
+  `_ESCRITORES` **y** en `_OPACOS`, y la primera se consulta antes; con clase `en_sitio` y sin
+  su bandera, `perl`, `awk` y `sed` salían como LECTURA con `opaco=False`. Como `core/grants.py`
+  descarta una concesión `read-only` cuando la orden es opaca, el defecto **invertía su
+  criterio**. Medido con la concesión del propio caso de uso del módulo (`sudo *`, `read-only`):
+
+  ```
+  sudo systemctl status nginx                        deny    ← lectura de diagnóstico
+  sudo journalctl / dmesg / netstat / ss / strings   deny
+  sudo perl -e 'unlink "gates/base.py"'              ALLOW   ← borra el juez, como root
+  sudo awk 'BEGIN{print "" > "/etc/sudoers.d/x"}'    ALLOW
+  ```
+
+  Seis de ocho diagnósticos denegados y las tres escrituras como root permitidas. Ahora hay
+  clase `en_sitio_opaco`: sin su bandera **no se derivó nada**, luego `opaco`. `ruff` y `gofmt`
+  siguen en `en_sitio` porque formatean lo que se les nombra y no ejecutan programa del usuario.
+  Y las tres tablas se comprueban **disjuntas al importar**: la causa raíz era el duplicado, no
+  el caso. `tests/adversarial/test_efectos_interpretes.py` (6) — **7 fallos sin el arreglo**.
+- **La cadena del diario se rompía con el uso normal** (`core/evidence.py`). `append_event` leía
+  la cabeza y escribía sin serializar; el argumento de que `O_APPEND` bastaba es correcto sobre
+  los BYTES y no dice nada de la CADENA. Con 12 guardianes concurrentes: **12 eventos escritos,
+  cadena rota en la línea 3**, y el motivo emitido acusaba de manipulación — «falta, sobra o se
+  movió algún evento» — lo que era concurrencia normal. Una alarma de integridad que salta con
+  el uso normal se aprende a ignorar. Ahora leer la cabeza y escribir el eslabón van dentro del
+  mismo `flock`, y `MECANISMO_DE_BLOQUEO` lo declara para poder afirmarlo. Medido después: 16
+  procesos → 16 eventos, cadena íntegra. De paso, `cabeza()` leía el fichero **entero** en cada
+  evento (O(n) en el camino caliente del guardián, sin techo); ahora lee desde el final.
+  `tests/adversarial/test_ledger_concurrente.py` (5).
+- **La atestación `I6'` no cubría lo que decide** (`core/trust.py`). `inventario_motor` recorría
+  sólo `rglob("*.py")`: **73 ficheros, cero de datos**. `roles/registry.json` alimenta
+  `capacidades_de()` y produce `DENY` en el guardián desde `da39715` — editarlo cambiaba
+  veredictos sin que `deriva_del_motor()` lo notara. La huella se quedó atrás **en el mismo
+  commit** que volvió relevante al registro. Ahora cubre `roles/`, `schemas/` y `policies/`
+  (78 ficheros, 5 de datos), y la documentación sigue sin moverla.
+  `tests/adversarial/test_huella_del_motor.py` (4).
+- **Un fallo de auditoría no retenía nada en `claude`** (`core/guard.py`). Con el diario
+  inescribible y una escritura que aprobaría: `claude` → `allow`, kiro/gemini/opencode →
+  exit 2, `antigravity` → `ask`. Tres respuestas al mismo hecho, y la permisiva era la del
+  runtime principal. `_emit_event` argumenta exactamente ese caso —«una aprobación sin registrar
+  quedaba idéntica a una registrada»— y el arreglo estaba en `_main_antigravity` y no en
+  `main()`. Ahora los dos dialectos estructurados responden `ask`: el trabajo no se pierde y lo
+  decide quien puede arreglar el diario. `tests/adversarial/test_auditoria_interrumpida.py` (4).
+- **Una concesión `read-only` concedía sin verificar** (`core/grants.py`). Con `efectos=None` la
+  comprobación se saltaba entera, contra el principio que el propio módulo defiende: «no poder
+  demostrar que no escribe no es haber demostrado que no escribe». Hoy `decide_command` siempre
+  los pasa, así que el camino real estaba cubierto; una firma que concede por omisión sólo
+  espera a que alguien la llame de otra forma. Dos pruebas existentes fijaban ese `fail-open` al
+  omitir el dato; **se corrigieron las pruebas, no el criterio**.
+- **`verify` indicaba una bandera que no acepta** (`core/report.py`). La puerta imprimía
+  `… y N más (use --verbose)` y `refuto verify --verbose` sale con **64**: `--verbose` es global
+  y va antes del subcomando. Ahora se imprime la orden entera.
+
+**Añadido**
+
+- **`scripts/check_mediciones.py`**, y CI lo ejecuta. Las cifras ESTRUCTURALES del README ya
+  tenían vigilante (`check_wiring`, `check_citas`) y cuadraban las siete; las de CORRIDA no, y
+  son las que se citan como `E3`/`E4`. Medido: la tabla declaraba **685 pruebas y 13 controles
+  con fecha del propio día**, cuando eran 748 y 14 — el commit que las puso al día (`bf9f061`)
+  fue seguido de cinco que añadieron 730 líneas de pruebas sin tocarla. No comprueba tiempos:
+  dependen de la máquina, y un control que falla por motivos que no son el defecto se desactiva.
+- **La deuda de `verify` se declara puerta a puerta** (`DEUDA_DECLARADA` en
+  `scripts/preflight.py`). `verify` estaba en `INFORMA` con el motivo «deuda declarada del
+  proyecto, no de este cambio»; el motivo era cierto —`git blame`: los 18 hallazgos de
+  `G-SECURITY` vienen de `e28249c`, en `main`— y **nada lo comprobaba**. Un tier estático afirma
+  para siempre algo medido una vez. Ahora `verify` es `BLOQUEA` y perdona sólo las ocho puertas
+  con deuda escrita: una puerta nueva en rojo retiene el empujón. Verificado en los dos
+  sentidos. Hoy ningún control usa `INFORMA`, y el módulo lo dice en vez de dejar un tier que
+  parece en uso.
+- **El control `datos-personales` cubre la norma que cita.** Comprobaba `/Users/…` y tres
+  dominios de correo personal, y se reportaba con ese nombre; `AGENTS.md` prohíbe además correos
+  corporativos, hosts internos y direcciones privadas. Un alcance declarado mayor que el medido
+  es un `PASS` que afirma de más. Ampliado a correo de cualquier dominio (salvo los de ejemplo y
+  los `noreply` de agentes), RFC 1918 y enlace-local, y sufijos internos. `.local` se dejó
+  **fuera**, medido: con él, **47 coincidencias y cero hosts** — `settings.local.json` (44),
+  `hooks.local.json` (2), `.env.local` (1). Sobre el árbol rastreado el resultado sigue siendo
+  cero ficheros: ampliar no costó ninguna excepción.
+
+**Propuesto, no aplicado** — `gates/**` está protegido por la propia política, así que lo aplica
+una persona:
+
+- **`G-SECURITY` aprueba con la herramienta caída**, y su `measure` afirma haberla usado.
+  Ejecutado sobre un espacio limpio con `trivy` sin poder bajar su base: `status: PASS`,
+  `measure: … herramientas: gitleaks, syft, trivy`, `obs: SBOM generado: 0 componentes`. Tres
+  defectos: el umbral sólo distingue ausente de presente y no cubre *caída*; un SBOM de cero
+  componentes aprueba contra «un ámbito vacío nunca aprueba»; y `measure` se construye con
+  `shutil.which()` —por estar instalada, no por haber funcionado—, así que **la evidencia
+  escrita afirma una cobertura que no hubo**. Que es olvido y no criterio lo demuestra el propio
+  fichero: `syft` sí pone `blocked = True` al fallar, y las otras dos no. Parche verificado con
+  `git apply --check` y ejecutado sobre una copia (`PASS` → `BLOCKED`):
+  [`docs/remediation/g-security-aprueba-con-la-herramienta-caida.md`](docs/remediation/g-security-aprueba-con-la-herramienta-caida.md).
+
+**Cerrado después, y es la otra mitad de la retractación.** Los tres arreglos de arriba que
+tocan `scripts/preflight.py`, `core/report.py` y `scripts/check_mediciones.py` se entregaron
+**verificados a mano y sin una sola prueba**. Es decir: el trabajo consistió en señalar
+controles que nadie vigilaba y se entregó añadiendo controles que nadie vigilaba. Un guion de
+verificación ejercitado sólo en el caso bueno no ha demostrado lo único que importa de él —que
+**sabe decir que no**—, que es el mismo criterio que `scripts/mutate_probe.py` se aplica a sí
+mismo con sus controles negativos `NC1`/`NC2`.
+
+- **`tests/unit/test_preflight_criterio.py`** (15) fija los bordes que una corrida real no
+  produce cuando uno quiere: puerta nueva en rojo, ámbito vacío, `NOT_APPLICABLE`, deuda ya
+  saldada, y que toda entrada de `DEUDA_DECLARADA` traiga motivo y nombre una puerta que
+  existe. Para poder probarlo sin pagar 40 s de puertas, el criterio se separó en
+  `clasificar_puertas()`. Dos pruebas nuevas cazaron defectos reales durante su propia
+  escritura: que `check_mediciones.py` no estaba rastreado por git —un control que no se publica
+  no protege a quien clona— y que el fichero de casos disparaba el detector que prueba (resuelto
+  partiendo los literales, como ya hace `tests/fixtures/__init__.py`, en vez de gastar la
+  primera entrada de `_PERSONALES_PERMITIDOS`).
+- **`tests/unit/test_next_ejecutable.py`** (5) comprueba que la orden que imprime una puerta la
+  acepta el parser REAL de refuto, no que el texto sea uno concreto. `core.envelope.Siguiente`
+  ya exigía esto del campo `do` —«una orden ejecutable, no una descripción»— y el texto que lee
+  una persona no estaba cubierto por nada.
+- **`tests/unit/test_check_mediciones.py`** (8), con el control negativo que faltaba: que el
+  guion detecte una cifra falsa, y que una afirmación DESAPARECIDA no se dé por buena — el modo
+  de fallo silencioso, donde «no hay problema» sería indistinguible de «ya no se comprueba
+  nada».
+
+**Y el hallazgo que quedaba en `E1` se midió, y era real** (`core/mcp_server.py`). El
+`workspace` lo aporta el modelo y `refuto_verify` escribe. Medido sobre un directorio recién
+creado, fuera de todo espacio gobernado:
+
+```
+.harness/evidence/ledger.jsonl · sbom.json · ver_edb734a4c5f14c66.json
+```
+
+No es destrucción ni exfiltración: es escritura **no solicitada fuera del espacio**, y la
+doctrina del producto sobre eso ya estaba escrita en `external_write_allow` —fuera del espacio
+sólo se escribe en raíces declaradas—. Esta superficie la rodeaba por no preguntarse cuál es el
+espacio: el módulo declaraba «no escribe lo que gobierna» y decía *qué* no escribe, no *dónde*.
+Ahora `_argv_de` exige que el destino sea la raíz desde la que se lanzó el servidor o un espacio
+que ya tenga `.harness/`. Es el criterio más estrecho que no cierra ningún uso real —verificar
+un directorio que nunca fue un espacio deja casi todas las puertas en `BLOCKED` y no informa de
+nada— y se comprueba en `_argv_de`, por donde pasan las siete herramientas, para que no dependa
+de que nadie añada mañana otra que escriba. `tests/adversarial/test_mcp_workspace.py` (8).
+
+**Medido tras los cambios** — `804/804` pruebas (1 omitida, sólo Windows) y
+`preflight PASS · 15 controles`, 2026-09-25, macOS arm64 (Darwin 25.4.0), Python 3.14.6.
+
+Y ya no es `single-host`: corrida [36186362072](https://github.com/osvalois/refuto/actions/runs/36186362072)
+sobre `cc7278a`, `ubuntu-latest`, matriz 3.10 y 3.13, **5 trabajos en verde** —incluido el
+preflight completo y las puertas sobre el espacio de ejemplo—. Los siete commits van en el
+PR [#6](https://github.com/osvalois/refuto/pull/6).
+
+**Lo que sigue sin estar, y no lo cierra un agente.** `G-PR` continúa en `FAIL`: ninguno de los
+45 commits cita un requisito, y **no se inventó ninguno**. El repositorio no tiene documento de
+requisitos —`G-TRACE` está `BLOCKED` exactamente por eso—, así que escribir `REQ-001` en un
+subject habría hecho pasar la puerta citando algo inexistente. Eso es mover la puerta, no
+pasarla, y es el fraude que este programa existe para impedir. Cerrarlo de verdad pide un
+documento de requisitos, que es otro trabajo. `G-HUMAN` sigue en `BLOCKED` por las cinco
+revisiones sin registrar, que es lo que el PR viene a pedir.
+
+---
+
 ## 0.4.0 — *sin publicar* · la política se hereda, y la evidencia dice cuál decidió
 
 `VERSION` sigue en `0.3.0`: esto describe la rama `assurance/identidad-canonica-y-falsacion`,
@@ -28,7 +195,8 @@ salieron los peores.
   Medido: con un merge ingenuo **los 10 ataques** de `tests/adversarial/test_monotonia.py`
   sobreviven; con `refinar()`, los 10 se rechazan. Las reglas: `ACUMULA` (unión —
   `protected_paths`, `secret_read_deny`, `command_deny`, `command_ask`, `network_rules`),
-  `REDUCE` (intersección — `writable_paths`, `external_write_allow`), `ENDURECE`
+  `REDUCE` (sólo estrechar, por cobertura demostrada — `writable_paths`,
+  `external_write_allow`), `ENDURECE`
   (`block_secret_content`), `MODO` (`default_modes`) y `PROPIO` (`schema`, `version`). Ningún
   campo de `Policy` puede quedarse sin regla: **el módulo no se importa si falta alguna**.
 - **Identidad de política encadenada.** `efectivo = sha256(padre.efectivo + "|" + digest)`. Dos
@@ -59,6 +227,374 @@ salieron los peores.
 - **Centinela del árbol y comprobador de citas** (`scripts/tree_sentinel.py`,
   `scripts/check_citas.py`): 30 citas `fichero::símbolo` resuelven, y una escritura ajena al
   árbol durante una medición se detecta en vez de contaminarla.
+
+**Añadido — un vocabulario, tres consumidores** (2026-09-24)
+
+- **`harness.envelope/v1`** (`core/envelope.py`, `schemas/envelope.schema.json`, ADR-0015): el
+  sobre que toda orden emite con `--json`. Lo que se unifica es el sobre —quién responde, con qué
+  estado, sobre qué espacio, con qué procedencia y **qué toca después**—; la carga útil de cada
+  orden viaja intacta bajo `payload` con su propio contrato. Medido antes de tocar nada: `--json`
+  en **11 de 24** órdenes, **20** contratos `harness.*/vN` emitidos y **3** publicados, y ni un
+  helper común de emisión — veinte `json.dumps` en línea, que es la razón estructural de que
+  hubiera veinte formas.
+- **El código de salida lo deriva el estado**, nunca se elige a mano. El defecto que cierra:
+  `refuto context --json` devolvía **2** —«no se pudo comprobar»— con la salida completa y válida
+  en stdout. Para una persona es invisible; en CI, `cmd && siguiente` no encadena nunca. La tabla
+  es deliberadamente gruesa (seis estados, cuatro códigos) y el contrato lo dice: `status` es
+  autoritativo, `exit` es para encadenar. `core.envelope` no se importa si un estado se queda sin
+  código.
+- **`next[]` es contrato, no cortesía.** Un estado que no aprueba **sin un solo `next` levanta
+  `ValueError` en la orden que lo cometió**. Viene medido: un agente al que se denegó su
+  directorio de entregables, sin que nada le dijera cuál usar, se llevó 9,2 GB a `/tmp`. Cada
+  paso declara `why`, una orden `do` **ejecutable** y `who` ∈ `persona | maquina | agente`, donde
+  `maquina` significa idempotente y sin decisión.
+- **Con `--json`, stdout lleva sólo el sobre.** `main()` captura la salida humana y la reencamina
+  a stderr. Así no hay cientos de guardas `if not opts.json:` —la que se olvide rompe el
+  protocolo en silencio— y el texto no se pierde. Una orden aún sin migrar se comporta
+  exactamente como antes: la migración es orden a orden.
+- **Órdenes migradas**: `doctor`, `status`, `verify`, `probe`, `mcp`, `inventory`, `upgrade`. Las
+  cuatro primeras y `upgrade` ganan además `--json`, que no tenían.
+- **`payload_of(doc)`**, el puente de migración en una función: acepta el sobre y la forma suelta
+  anterior, para poder migrar emisor y consumidor en commits distintos. Ya lo usan
+  `scripts/gate_summary.py` y `scripts/check_probe_honesty.py`, que es lo que lee
+  `.github/workflows/refuto.yml`.
+
+**Añadido — el monitor de referencia gana un sujeto, y el privilegio se parametriza** (2026-09-25)
+
+El control de acceso es una relación ternaria `(sujeto, objeto, operación)` y refuto decidía
+sobre una binaria: el hecho normalizado tenía siete campos y ninguno era el sujeto. Consecuencia
+matemática, no de implementación: **todo agente en todo rol tenía autoridad idéntica**.
+
+- **El canal de lectura, que estaba sin mirar.** `secret_read_deny` se aplicaba en
+  `decide_write` (escrituras) y en `adapters/claude.py` (capa del agente, sobre `Read`). El
+  guardián engancha `Bash`, así que `cat .env` salía `allow` y `cp .env ~/.claude/…/memory/` —que
+  **sobrevive a la sesión**— también. Y el dato ya estaba: `Efectos.lecturas` se poblaba y
+  `decide_command` tenía tres referencias a `escrituras` y **cero** a `lecturas`. Ahora leer una
+  credencial es `ask` —un `deny` duro se rodea con `python3 -c`, que es opaco, y entonces el canal
+  deja de mirarse— y la **combinación** lectura-de-credencial + escritura-fuera-del-espacio es
+  `deny`: no tiene lectura legítima, y que el destino esté en `external_write_allow` no lo cambia.
+- **El sujeto** (`core/capabilities.py`). 22 roles declaraban 10 restricciones cuyos únicos
+  consumidores las imprimían en el informe bajo «No puedes:». **Diez capacidades por veintidós
+  roles, aplicadas por cero líneas de código.** Y peor, en la propia puerta: `G-ROLES` declara en
+  su umbral «restricciones **aplicables**» y las contrastaba contra `KNOWN_CONSTRAINTS`, que es el
+  diccionario de **prosa** del informe — «no sabe aplicar» significaba «no tengo una frase en
+  español para describirla». Ahora se valida contra `capabilities.CONOCIDAS` = aplicadas ∪
+  declaradas no observables **con motivo**; la tercera categoría ya no se puede expresar. Reparto:
+  5 aplicadas, 5 no observables. Una de ellas, `destructive_requires_approval`, es no observable
+  **porque sería una relajación**.
+- **Elevación parametrizada** (`core/grants.py`). `command_deny` colapsaba cuatro dimensiones
+  —privilegio, destrucción, alcance externo, integridad de suministro— en una lista plana con dos
+  verdictos, así que `sudo cat /etc/shadow` y `sudo systemctl status` eran la misma regla. Una
+  concesión declara `roles × hosts × commands × effects × expires × evidence`, se evalúa **antes**
+  de `command_deny` —como `writable_paths` va antes de `protected_paths`— y `effects: read-only`
+  se **verifica contra `Ê`**: si la orden escribe, o si es **opaca**, la concesión no aplica. Lo
+  que impide que sea un agujero no es un campo que alguien deba comprobar: la concesión vive en
+  `.harness/policy.json`, que la política protege, así que un agente no puede concederse
+  privilegio a sí mismo.
+- **El informe de sesión anuncia las concesiones vigentes** para ese rol en esa máquina. Sin eso
+  el mecanismo existe y nadie lo usa: un agente que no sabe que tiene una concesión se comporta
+  como si no la tuviera, y el camino declarado se queda sin usar mientras el atajo opaco sigue
+  ahí. No se listan las caducadas ni las de otro host — prometer autoridad que no hay es lo peor
+  que puede hacer un informe que se toma por cierto el resto de la sesión.
+- **Dos reglas de monotonía nuevas**, porque `core/refinement.py` no se importa hasta que un campo
+  declara la suya: `ACUMULA_MAPA` (unión clave a clave, para las capacidades — en negativo
+  precisamente para que la unión sea la operación correcta) y `REDUCE_LISTA` (el hijo sólo retira
+  registros enteros, por contenido canónico: comparar «anchura» entre concesiones exigiría decidir
+  inclusión entre globs, que es lo que ADR-0014 evita).
+- **`core.trust.RAIZ_NO_ACOTA`**, una excepción y sólo una. Con `REDUCE_LISTA` y la raíz del motor
+  vacía, **ningún espacio podía declarar ninguna concesión nunca** — la misma trampa que ADR-0014
+  documenta para `writable_paths`, escrita otra vez. La salida no es clasificar el campo como
+  `PROPIO`, que dejaría a un proyecto aflojar lo que su cliente apretó: es reconocer que la raíz
+  del motor **no es un cliente** y no puede enumerar las necesidades operativas de espacios que no
+  conoce. Una prueba la fija en exactamente un campo para que no crezca en silencio, y la
+  monotonía entre capas reales queda intacta.
+
+Lo que **no** se afirma: `HARNESS_ROLE` es una variable de entorno, así que atenúa por rol
+DECLARADO y no por principal criptográfico; `Ê` sigue incompleto (`tar`, `python3 -c`); la
+contención de directorios es de un nivel (medido: 0,08 ms una lectura simple, 2,94 ms listando 43
+entradas); y el entorno se sigue heredando entero, que es la Capa 4 y está propuesta sin código.
+Diseño completo, alternativas descartadas y tradeoffs: ADR-0016.
+
+**Corregido — nombres de producto y un inventario de credenciales en un repositorio público**
+(2026-09-25)
+
+Una retractación, y de las que importan. Al añadir `secret_env_deny` metí en la lista de fábrica
+**once nombres concretos de servicios** —los proveedores de nube y de modelos más habituales— y,
+en un comentario de `core/policy.py`, el inventario de qué credenciales había en la máquina donde
+lo medí, **incluida una con el nombre de un cliente**. Se empujó a un repositorio público.
+
+No se expuso ningún valor. Se expuso el **mapa**: de qué servicios hay credenciales y en qué
+máquina. Para alguien hostil eso es casi tan útil, y en un producto de gobierno la asimetría es
+inaceptable — el control estaría publicando parte de lo que existe para proteger. `AGENTS.md` ya
+lo prohibía en prosa desde el principio.
+
+- **La lista pasa a ser puramente estructural** (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`…):
+  13 patrones de forma en vez de 28 con nombres dentro. **No pierde cobertura**, comprobado uno a
+  uno: los once nombres ya los cubría un patrón. Y gana — el enfoque estructural alcanza servicios
+  que no existían al escribirlo, que es justo lo que una lista de marcas no puede hacer, porque
+  envejece en cuanto alguien contrata un proveedor nuevo. Medido: `*_KEY` no añade **ni un** falso
+  positivo sobre un entorno real de 70 variables.
+- **Control nuevo en el preflight: `nombres-de-producto`.** La regla existía en prosa y no la
+  comprobaba nada sobre el código — el control de datos personales miraba rutas y correos. Un
+  control que depende de que quien escribe se acuerde no es un control. Busca
+  `<MARCA>_…_<SUFIJO_DE_CREDENCIAL>` sobre el árbol rastreado, con cuatro ficheros declarados
+  legítimos y su motivo (`core/provider.py` existe para reconocer esas variables; sin nombrarlas
+  no hay nada que reconocer).
+- **Por qué ese patrón y no «cualquier mención de una marca»:** la primera versión del control
+  marcaba cualquier aparición y dio **28 ficheros** —`gemini` es un runtime soportado y se nombra
+  en todas partes, con razón—. 28 hallazgos sobre 0 defectos es la definición de un control que
+  se desactiva en una semana. Afinado al defecto que de verdad hubo: **5 ficheros, y uno era el
+  mío**.
+- Los ejemplos de comentarios y pruebas usan ahora una forma inventada (`MI_SERVICIO_API_KEY`),
+  que es lo que `AGENTS.md` prescribe para todo lo demás.
+
+**Lo que esto NO deshace:** los nombres están en el historial publicado de `f045aa4`. Reescribir
+historia publicada exige `git push --force`, que la política de este espacio rechaza; queda como
+decisión de una persona, con la alternativa de rotar lo que se nombró.
+
+**Añadido — la credencial que vive en una variable, no en un fichero** (2026-09-25)
+
+Medido en el entorno de una sesión gobernada real: **70 variables y 7 con forma de credencial**, todas legibles con un `printenv`. El fichero `.env` vigilado y el mismo secreto en
+`$MI_SERVICIO_API_KEY`, libre.
+
+- **`secret_env_deny`** (`ACUMULA`) compara el **nombre** de la variable, nunca el valor: mirar el
+  valor de cada una para decidir si es un secreto obligaría a leer todos los secretos para
+  protegerlos. Se consulta en el MISMO canal de lectura que las rutas, porque
+  `printenv MI_SERVICIO_API_KEY` y `cat .env` son la misma pregunta por dos caminos.
+- **La vía a granel, que es la fácil.** `env`, `printenv`, `set` no declaran ninguna lectura
+  —`efectos("env").lecturas == set()`, no hay argumento que derivar— así que se enumeran. Sólo se
+  pregunta si el entorno tiene de verdad alguna variable con forma de credencial: en una máquina
+  limpia `env` es inofensivo y preguntarlo sería ruido. `env FOO=1 orden` no es un volcado. Y
+  `env > /tmp/claude-x/todo` es `deny`: la redirección rompía la comprobación de «sólo banderas»
+  y salía `allow`, que era el volcado del entorno entero a un fichero que la política abre.
+- **La curación de la lista ES el trabajo.** Un sondeo con `SESSION|AUTH|KEY` marcaba
+  `SSH_AUTH_SOCK` —la ruta de un socket, y quitarla rompe el agente de ssh—, `TERM_SESSION_ID` y
+  `HARNESS_SESSION`, que es de refuto. Un detector que marca lo normal enseña a ignorarlo, y
+  entonces deja de proteger de lo que sí.
+
+**Corregido en ADR-0016 — una pieza que yo mismo propuse y NO es implementable** (2026-09-25)
+
+El ADR proponía «`${secreto:NOMBRE}` resuelto en el punto de ejecución». No se puede hacer aquí, y
+no por coste: el contrato del guardián es `{allow, deny, ask}` en los seis runtimes
+(`core/guard.py:17-23`) y un gancho `PreToolUse` **no reescribe la orden**. refuto es un monitor
+en el canal de órdenes, no un ejecutor, así que no hay punto donde sustituir. Fue un error de
+frontera: describí una capacidad de un ejecutor en el documento de un monitor. Lo que sí controla
+refuto es el entorno que ENTREGA —`core/session.py` lanza al agente con `env=`— y eso queda
+propuesto, porque retirar una variable puede romper una sesión que la necesita y ese riesgo lo
+decide quien opera el espacio.
+
+**Añadido — `scripts/preflight.py`, un solo sitio donde consta qué hay que cumplir** (2026-09-25)
+
+- **13 controles con el vocabulario de seis estados** y la regla que los ordena: **una
+  herramienta ausente da `BLOCKED`, nunca `PASS`**. No es teoría — el 2026-09-24 se midió
+  `G-SECURITY` aprobando con `trivy` caído. Emite el sobre `harness.envelope/v1` con `--json`,
+  así que CI y un agente lo leen sin caso especial, y el código de salida lo deriva el estado.
+- **`BLOQUEA` frente a `INFORMA`, y la diferencia se declara.** `refuto verify` está en
+  `INFORMA` porque sus dos puertas en rojo son deuda del proyecto y no de un cambio concreto: un
+  preflight que nace en rojo se desactiva con `--no-verify`, y entonces no protege de nada.
+- **`--excepto CONTROL` declara lo que no cubrió** en vez de castigarlo. La primera versión tenía
+  un `--rapido` que omitía la suite y devolvía `BLOCKED` a propósito; el instinto era correcto y
+  la herramienta equivocada, porque en CI la suite la ejecuta otro trabajo y castigar la omisión
+  obligaba a duplicar ~200 s o a no usar el guion en CI. Lo omitido viaja en `payload.skipped` y
+  en un `next`.
+- **Si falta una herramienta, el paso siguiente es INSTALARLA.** Decía «`ruff` no está en el
+  PATH» y proponía `ruff check .` — la orden que acababa de fallar. Ahora propone
+  `brew install ruff` con turno `persona`. Es la misma regla que el sobre aplica con `next`,
+  aplicada al propio preflight.
+- **El gancho `pre-push` lo ejecuta.** Antes hacía **una** cosa —impedir un empujón a `main`— y
+  no comprobaba nada, así que «pasó el preflight» no significaba nada y lo primero que se caía
+  era el runner, con el commit ya publicado. Se omite con `HARNESS_SIN_PREFLIGHT=1`, explícito
+  por el mismo motivo que `--no-verify`.
+- **Trabajo `calidad` en CI**, que ejecuta **el mismo guion** con `ruff`, `bandit`, `actionlint`
+  y `gitleaks` de versión anclada. Nació porque `check_wiring.py` se puso en rojo al añadir el
+  preflight —«un guion que existe y que CI no ejecuta es una comprobación que nadie corre»—, que
+  es exactamente lo que esa puerta existe para hacer.
+- **Corregido en el gancho una afirmación que dejó de ser cierta**: decía que la protección de
+  rama no estaba disponible, con su medición de HTTP 403 del 2026-09-23. La medición sigue siendo
+  cierta y ya no describe la situación — el repositorio pasó a público el 2026-09-25 y las reglas
+  de rama sí están disponibles. Se declara, porque es mejor que el gancho: no se salta con
+  `--no-verify`.
+
+**Añadido — criterio de análisis estático, medido antes de elegirlo** (2026-09-25)
+
+- **`ruff` en `pyproject.toml`**, con `select = ["F", "E9", "B904", "B905"]` y el motivo de cada
+  exclusión. Medido sobre este árbol: `F,E9` → 0 · `F,E4,E7,E9` → 45 · `F,E,W` → **3.890**. Se
+  elige el conjunto que está verde de verdad y señala defectos, no estilo: un criterio que nace
+  con 3.890 hallazgos no se arregla, se desactiva. `E702` y `E741` quedan fuera porque el punto y
+  coma y los nombres cortos son el estilo compacto deliberado de este código.
+- **49 defectos reales corregidos** que ese criterio encontró: 39 importaciones sin usar, 6
+  f-strings sin interpolación, 3 variables locales muertas, 1 redefinición. Más `B904` (perdía el
+  encadenado de excepciones en `core/refinement.py`) y `B905` (un `zip` sin `strict` en
+  `core/session.py`, donde las dos secuencias ya se habían comprobado del mismo largo).
+- **`bandit` con seis supresiones declaradas, cada una con su motivo.** Sin ellas daba **70
+  hallazgos y cero defectos reales**: 61 de la familia `subprocess` —que es literalmente el
+  trabajo de refuto—, 5 de `B105` disparando sobre `PASS = "PASS"` y sobre los **nombres** de
+  variables de entorno, y 2 de `B108` sobre `/tmp/claude-*/**`, que es un patrón de política. Con
+  las supresiones queda en 0 y sirve para lo que venga después.
+- **Endurecido el parseo de XML que recibe entrada ajena.** `bandit` señaló `B314` en
+  `scripts/check_diagram_assurance.py`, que parsea ficheros del disco — y en CI esos ficheros
+  llegan dentro de un PR, es decir entrada no confiable en un repositorio público.
+  `xml.etree.ElementTree` no resuelve entidades externas (XXE no aplica) pero sí expande
+  entidades internas, que agotan memoria con un fichero de pocos kilobytes. Se rechaza `DOCTYPE`
+  y `ENTITY` **antes** de parsear: mirarlo después sería mirarlo después del daño. Los dos avisos
+  del generador se declaran `# nosec` con su motivo — parsea lo que él mismo acaba de generar.
+- **Comprobador de datos personales**, que aplica la regla de `AGENTS.md` al árbol rastreado. Era
+  una regla escrita y sin nada que la comprobara, y el repositorio pasó a público. Su lista de
+  excepciones está **vacía y medida**. La primera versión incluía `/home/…` y marcó dos ficheros
+  de prueba cuyas rutas son `/home/persona/Documentos` — exactamente los marcadores genéricos que
+  la regla **prescribe**; un detector que marca el cumplimiento de la norma enseña a ignorarlo.
+
+**Añadido — `refuto mcp-serve`, refuto como servidor MCP stdio** (2026-09-25)
+
+- **Siete herramientas de sólo lectura** (`core/mcp_server.py`): `refuto_doctor`,
+  `refuto_status`, `refuto_verify`, `refuto_probe`, `refuto_mcp_check`, `refuto_inventory`,
+  `refuto_upgrade_plan`. Cada una devuelve el sobre `harness.envelope/v1` en
+  `structuredContent` y un resumen legible en `content`. No reimplementa nada: invoca
+  `refuto.main(argv + ["--json"])`, así que si `verify` cambia su veredicto, esta boca lo dice
+  al día siguiente sin tocar el archivo. Es el motivo de haber construido el sobre primero.
+- **Tres cosas que esta superficie no hace, y son contrato probado**
+  (`tests/adversarial/test_mcp_server.py`, 23 pruebas): no ejecuta órdenes arbitrarias —el
+  `argv` sale de una tabla fija y el modelo sólo aporta una ruta y booleanos validados, sin
+  concatenación de cadenas en ninguna parte—; no escribe lo que gobierna —ni `--apply`, ni
+  `--force`, ni `wire`/`unwire`, ni `install`; `upgrade` se expone sólo como plan—; y no gasta
+  dinero —`--deep` no se expone, porque el sondeo profundo envía un prompt de pago cuyo coste no
+  está medido—. La última red comprueba el `argv` **completo**, no los argumentos de entrada: si
+  alguien añade mañana una entrada con una bandera de escritura, se para ahí.
+- **`isError` es del protocolo, no del veredicto.** Un `verify` que devuelve `FAIL` es una llamada
+  que funcionó e informa de que el espacio no cumple; marcarla `isError` haría que el cliente la
+  tratara como fallo del servidor y, según el cliente, la reintentara o la ocultara. El veredicto
+  viaja en `structuredContent.status`, que tiene seis valores porque dos no bastan.
+- **Habla las dos revisiones**: `server/discover` (2026-07-28, con `supportedVersions` y la
+  identidad en `_meta`) y `initialize` (2025-06-18). La primera versión emitió
+  `protocolVersions` y un `serverInfo` suelto: el cliente de refuto lo alcanzaba y listaba las
+  siete herramientas, y devolvía `protocol_versions: []` y `server_info: {}` — un servidor que
+  responde y del que no se puede afirmar qué revisión habla. Se corrigió contra
+  `docs/research/mcp.md`. **El cliente propio de refuto lo interroga en la suite**, que es lo que
+  convierte esa simetría en una prueba y no en una coincidencia.
+- **No se cae por una línea ilegible.** Un servidor que muere ante el primer mensaje malo obliga
+  al cliente a distinguir «se cerró» de «no entendió», y no puede: lo que ve es un descriptor
+  cerrado. Se responde el error y se sigue escuchando.
+- **stdout es sólo protocolo**, y el informe humano no se vuelca al log en cada llamada: 35
+  líneas por invocación de `doctor` es ruido en un canal que los clientes MCP muestran como log
+  del servidor. Se conserva y viaja **dentro del error** cuando la llamada falla, que es cuando
+  es lo único que explica la causa.
+
+**Corregido — la procedencia de toda la evidencia declaraba la versión equivocada** (2026-09-25)
+
+`core/model.py` llevaba `VERSION = "0.2.0"` a fuego mientras el fichero `VERSION` decía `0.3.0`.
+Dos fuentes para el mismo hecho, y la que se separó sin avisar era la que **firma toda la
+evidencia**: `provenance()` la pone en `harness_version`. Comprobado en un artefacto real,
+`.harness/evidence/ver_*.json` → `harness_version: 0.2.0` con el motor en `0.3.0`. Para un
+producto cuya tesis es que la evidencia se puede falsar no es cosmético: es la cifra con la que
+alguien reproduciría la medición, y apuntaba al sitio equivocado — y `refuto upgrade` ya leía el
+fichero, de modo que la herramienta sabía la versión correcta y la escribía mal. Ahora se deriva
+del fichero, con `importlib.metadata` como respaldo cuando va instalada como paquete, y
+`desconocida` si no se puede leer: una procedencia que miente es peor que una que se declara
+ausente, porque la segunda se nota. Fijado en `tests/contract/test_result_contract.py`.
+
+**Corregido — `pip install .` ensuciaba el índice de git** (2026-09-25)
+
+`.gitignore` sólo excluía `__pycache__/`, así que `build/` (936 KB) y `refuto.egg-info/` (28 KB)
+quedaban listos para colarse en el siguiente commit de cualquiera que ejecutara `pip install .` o
+`python -m build` — que `pyproject.toml` invita a hacer. Se descubrió midiendo justo eso.
+
+**Corregido — códigos de salida que afirmaban lo que no constaba** (2026-09-24)
+
+- **`refuto mcp` devolvía 1 con `NOT_APPLICABLE`**, es decir «algo está mal», para un espacio que
+  legítimamente no declara MCP — mientras la propia puerta dice «no es un aprobado: es que la
+  puerta no tiene sujeto aquí». Ahora lo proyecta la tabla.
+- **`refuto verify` con cero puertas ejecutadas salía con 0.** Un ámbito vacío aprobando, que es
+  lo que este programa existe para no hacer; la regla estaba escrita para las suites y no se
+  aplicaba a la verificación. Igual en `refuto probe`, donde `all(...)` sobre una lista vacía
+  daba `True` y la sonda salía con 0 sin haber medido nada.
+- **`refuto upgrade` en seco salía con 0**, indistinguible de «al día». Ahora `BLOCKED` cuando
+  queda trabajo.
+- **`refuto status` con evidencia ilegible salía con 0.** Ahí `status` no informa de un estado:
+  declara que no lo sabe. Ahora `INCONCLUSIVE`. En todo lo demás conserva `PASS`, porque cambiarlo
+  rompería a quien encadena `refuto status && …`; lo pendiente viaja en `next`.
+- **Tres instrucciones para el mismo hueco.** Ante un lock ausente, `doctor` decía
+  `refuto init`, la puerta G-LOCK decía `refuto lock init` y el índice de la ayuda omitía `init`.
+  Ahora el remedio sale de **una** tabla, que alimenta a la vez el texto humano y `next` — y por
+  tanto no pueden divergir. Además dice de quién es el turno: anclar un origen inmutable es acto
+  de persona, no una orden que se lance sola.
+
+**Corregido — actualizar dejaba la mitad sin actualizar** (2026-09-24)
+
+- **`upgrade --apply` sólo regeneraba el lanzador de Claude.** Un espacio cableado para
+  Antigravity o para Kiro salía con punteros al motor viejo y el mensaje decía que se había
+  actualizado. Ahora se regeneran todos los runtimes que el espacio tenga cableados.
+- **La deriva de la norma no se medía, y la conclusión obvia era falsa.** `upgrade` no toca la
+  política por diseño, de donde parecía seguirse que ninguna corrección de la norma base llega a
+  un espacio instalado. **Falso en la mitad que importa**, medido: `Policy.load` compone toda
+  política con la raíz del motor y `protected_paths` ACUMULA, así que una protección NUEVA se
+  propaga sola, sin `upgrade` y aunque el fichero del espacio no la declare. Lo que no se propaga
+  es la EXCEPCIÓN —`writable_paths` es `REDUCE` y manda la lista del hijo—, de modo que un espacio
+  que declaró `.harness/memory/**` deja a sus repositorios hijos sin memoria de agente **y no se
+  entera**: no es un agujero, es más estricto, y por eso ninguna puerta lo señalaba. Ahora
+  `_deriva_de_norma` lo mide y `upgrade` lo nombra con su turno. Las dos mitades quedan fijadas
+  por separado en `tests/selftest/test_propagacion_de_norma.py`; juntarlas en una sola afirmación
+  es exactamente el error que se cometió al razonarlo sin medirlo.
+
+**Corregido — lo que salió de auditar un espacio multi-repo real** (2026-09-24)
+
+Los cinco defectos de abajo se midieron en un mismo espacio gobernado cuya raíz no es
+repositorio y cuyos dos hijos sí. El síntoma de partida era «el arnés sólo deja trabajar en
+`/tmp`»; ninguno de los cinco era eso, y los cinco eran reales.
+
+- **Las protecciones sólo cubrían la RAÍZ.** `DEFAULT_PROTECTED` estaba anclado al primer nivel,
+  así que en un espacio multi-repo el agente podía reescribir el guardián, la política y la
+  evidencia de cada hijo:
+
+      Write  .harness/bin/guard                     →  deny   («.harness/**»)
+      Write  repo-hijo/.harness/bin/guard           →  ALLOW
+
+  Ahora todas llevan `**/`, que cubre la raíz Y cualquier profundidad. No son patrones nuevos:
+  es el alcance corregido de los que ya había. El dueño de ese espacio había parcheado la norma
+  base a mano para tapar el agujero — que un espacio tenga que hacerlo significa que el agujero
+  era de la norma base.
+- **La excepción no acompañaba a la protección, y no se podía arreglar desde el espacio.**
+  `protected_paths` ACUMULA y `writable_paths` REDUCE: cada protección que cubra más profundidad
+  que su excepción produce una denegación colateral **irreparable**, porque añadir la excepción
+  levanta `HerenciaIrresoluble` y un guardián que no carga deniega todo. Medido: los repositorios
+  hijos quedaban sin memoria de agente. `DEFAULT_WRITABLE` pasa a `**/.harness/memory/**`, y las
+  dos listas se mueven juntas por contrato (`tests/unit/test_policy.py`).
+- **`REDUCE` comparaba cadenas, no cobertura** (`core/refinement.py`). Corregir la norma base
+  dejaba ungobernable **todo espacio ya instalado**, porque el instalador escribía el valor
+  anterior y pasaba a leerse como «el hijo añade una entrada que el padre no tiene». Ahora la
+  inclusión se demuestra (`_cubre`): `X ⊂ **/X` es estrechar, y la dirección contraria sigue
+  siendo violación. Ante la duda se responde «no cubre», que es el lado seguro. El efectivo pasa
+  de la intersección a la lista del hijo — para toda política que ya cumplía, el mismo resultado.
+- **El guardián rechazaba la prosa que MENCIONA una orden denegada.** `_segmentos` extraía
+  órdenes de `$(…)` y de acentos invertidos sobre el cuerpo de un documento aquí, que el shell
+  **no expande**. Un agente que documentaba en markdown la frontera de lo que NO había ejecutado
+  se bloqueaba a sí mismo:
+
+      cat > 00_AUTHORIZATION.md <<'EOF'
+      `adb root`, fastboot, flashing, `dd`, escritura de particiones…
+      EOF
+                                  →  deny  («dd:*»)
+
+  Medido también con `` `sudo` `` y con `` `rm -rf /` ``, que además salía como
+  «fuera-del-espacio» porque `core.effects` leía el `/` del texto como destino real. Ya le había
+  pasado a `_partir` con las comillas —lo cuenta su docstring— y se arregló sólo para comillas.
+  Ahora `_sin_cuerpos_citados` descarta el cuerpo de `<<'EOF'` y `<<"EOF"`; `<<EOF` sin citar SÍ
+  expande y se sigue analizando, y la línea del operador se conserva siempre, así que la
+  redirección se sigue juzgando. Un control que salta con el TEXTO y no con la ACCIÓN se rodea:
+  el rodeo medido fue dejar de usar el shell para escribir, y entonces el canal deja de mirarse.
+- **Una política mínima legítima no cargaba.** `{"schema": "harness.policy/v1", "name": "x",
+  "version": "1"}` —la forma natural de decir «acepto la norma base»— levantaba
+  `PoliticaIlegible` hablando de «la política de OTRO programa» y enumerando cero campos ajenos,
+  y el guardián denegaba todo. Incoherente con `{}`, que sí valía. Ahora un documento que declara
+  NUESTRO esquema y ninguna clave ajena es una política mínima; con una sola clave ajena presente
+  el control sigue cazando el caso real que lo motivó (nueve secciones de otro contrato).
+- **Denegar sin nombrar la alternativa desvía en vez de proteger.** El mensaje único acusaba de
+  «mover la puerta» también al agente que CREA un fichero nuevo dentro de un nombre reservado.
+  Caso medido: un espacio cuyo entregable era un dossier llamado `evidence/` —la palabra que
+  refuto reserva para el diario que lo juzga, contrato opuesto— se llevó 9,2 GB y 197 ficheros a
+  `/tmp`, fuera de git y en un directorio que el sistema borra a los 3 días. Nunca intentó
+  escribir dentro del espacio: no hubo denegación que lo empujara, sólo un nombre reservado y
+  ninguna indicación de que renombrar era la salida. Ahora se distingue editar el juez de
+  colisionar con su nombre, y el segundo mensaje dice qué hacer.
 
 **Corregido**
 

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -18,7 +17,7 @@ from core.probe import ProbeReport
 from core.roles import load as load_roles
 from core.routing import fallback, route
 from tests.fixtures import GHP_SINTETICA
-from core.toolplan import REQUIRED, install_proposal, plan
+from core.toolplan import install_proposal, plan
 from tests.fixtures import Workspace
 
 

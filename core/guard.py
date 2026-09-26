@@ -105,18 +105,101 @@ def normalize(runtime: str, payload: dict) -> dict:
         "content": _first(payload, shape["content"]),
         "command": _first(payload, shape["command"]),
         "cwd": _first(payload, shape["cwd"]),
+        # El sujeto. Ningún runtime lo trae en la carga del gancho, así que se lee del
+        # entorno, que es donde `refuto chat` lo deja. Vacío significa «sesión sin rol
+        # declarado», y entonces no hay capacidad que aplicar — no significa «sin límites»:
+        # la política general sigue rigiendo igual que antes de que existiera esto.
+        "role": os.environ.get("HARNESS_ROLE", ""),
         "structured_reply": shape["structured"],
     }
 
 
+def _capacidades(rol: str) -> tuple:
+    """Las capacidades del rol, o vacío si no se pueden determinar.
+
+    `try` ancho a propósito: el diario no puede caerse porque el registro de roles no se lea. Un
+    evento sin la lista es peor que uno con ella y mucho mejor que ninguno.
+    """
+    try:
+        from core.capabilities import capacidades_de
+        return capacidades_de(rol)
+    except Exception:                                                   # noqa: BLE001
+        return ()
+
+
 def evaluate(policy: Policy, workspace: Path, fact: dict):
-    """Aplica la política al hecho normalizado. Una escritura, una orden, o nada que decidir."""
-    if fact["command"]:
-        return decide_command(policy, fact["command"]), "command"
-    if fact["path"]:
-        return decide_write(policy, workspace, fact["path"], fact["content"]), "write"
+    """Aplica la política al hecho normalizado.
+
+    Las dos dimensiones se evalúan, no una U otra
+    ----------------------------------------------
+    Esto era `if command: … return` / `if path: … return`, dos ramas excluyentes. La
+    consecuencia, medida el 2026-09-23 contra el guardián real con la misma política:
+
+        Write  gates/base.py           →  deny   («gates/**»)
+        Bash   echo x > gates/base.py  →  allow  ← `protected_paths` no se consultaba
+
+    Una carga puede traer las dos cosas, y aunque no las traiga, una ORDEN tiene efectos
+    sobre RUTAS. `decide_command` ya resuelve los efectos (`core.effects`); aquí sólo hay
+    que dejar de cortar el flujo antes de tiempo y quedarse con la decisión más restrictiva.
+    """
     from core.policy import Decision
-    return Decision(ALLOW, reason="la carga del gancho no trae ruta ni orden que evaluar"), "none"
+
+    decisiones = []
+    if fact["command"]:
+        decisiones.append((decide_command(policy, fact["command"], workspace), "command"))
+    if fact["path"]:
+        decisiones.append((decide_write(policy, workspace, fact["path"], fact["content"]),
+                           "write"))
+    # ── el SUJETO ────────────────────────────────────────────────────────────────────
+    #
+    # Se evalúa DESPUÉS de las rutas y las órdenes, y se compone con `max`, que es lo que hace
+    # que una capacidad sólo pueda APRETAR por construcción y no por disciplina de quien la
+    # escriba: nunca puede convertir un `deny` de la política general en un `allow`.
+    #
+    # Sin rol declarado no hay capacidad que aplicar, y eso NO significa «sin límites»: la
+    # política general rige igual que antes de que esto existiera.
+    if fact.get("role"):
+        decisiones.append((_decidir_capacidad(policy, workspace, fact), "capability"))
+
+    if not decisiones:
+        return Decision(ALLOW,
+                        reason="la carga del gancho no trae ruta ni orden que evaluar"), "none"
+    # Gana la más restrictiva: la herramienta ejecuta TODO lo que la carga declara.
+    peor, kind = max(decisiones, key=lambda d: _ORDEN_DECISION[d[0].outcome])
+    return peor, kind
+
+
+def _decidir_capacidad(policy: Policy, workspace: Path, fact: dict):
+    """El veredicto de las capacidades del rol sobre este hecho.
+
+    Reúne lo que el rol necesita saber —qué rutas toca el hecho y qué lecturas de credencial
+    lleva— y se lo pasa a `core.capabilities`, que es donde vive la tabla. La separación importa:
+    este módulo sabe traducir cargas de gancho y aquél sabe qué significa cada restricción.
+    """
+    from core.policy import Decision, _lecturas_secretas
+
+    rutas: list = []
+    lecturas: tuple = ()
+    if fact.get("path"):
+        rutas.append(fact["path"])
+    if fact.get("command"):
+        try:
+            from core.effects import efectos
+            ef = efectos(fact["command"])
+            rutas += sorted(ef.escrituras)
+            lecturas = tuple(_lecturas_secretas(policy, workspace, ef.lecturas))
+        except Exception:                                               # noqa: BLE001
+            pass        # no poder derivar efectos no concede nada: sólo deja de añadir motivos
+
+    from core.capabilities import decidir
+    motivo, restriccion = decidir(policy, fact["role"], fact, rutas=rutas,
+                                  lecturas_secretas=lecturas)
+    if not motivo:
+        return Decision(ALLOW, reason=f"ninguna capacidad de «{fact['role']}» lo impide")
+    return Decision(DENY, rule=f"rol:{fact['role']}/{restriccion}",
+                    reason=f"«{fact['role']}»: {motivo} Esta restricción la declara "
+                           f"`roles/registry.json` y hasta el 2026-09-25 sólo se imprimía en el "
+                           f"informe de sesión: ahora la aplica el guardián.")
 
 
 def _digest_de(policy) -> str:
@@ -157,12 +240,24 @@ def _emit_event(workspace: Path, fact: dict, decision, kind: str,
             "reason": decision.reason,
             "euid": euid(),
             "sudo_user": os.environ.get("SUDO_USER", ""),
+            # QUIÉN actuó. Sin esto el diario decía qué regla denegó y no a quién, así que
+            # una auditoría no podía responder «¿qué hizo el revisor adversarial?». 174
+            # decisiones registradas antes de esto y ninguna sabía el rol.
+            "role": fact.get("role", ""),
+            "role_capabilities": list(_capacidades(fact.get("role", ""))),
             # QUÉ política decidió esto. Sin el digest, un evento dice qué regla denegó pero
             # no de qué política efectiva salió — y con herencia esa pregunta pasa de ociosa a
             # central: la regla pudo venir del cliente, y el cliente pudo cambiar después.
             # Vacío significa «no se pudo determinar», no «no hay»: las dos cosas se
             # distinguen porque la segunda no existe — toda política cargada lleva identidad.
             "policy_digest": digest,
+            # Qué se pudo DEMOSTRAR del efecto de la orden, y qué no. Una orden opaca no
+            # se deniega —denegar todo `python3` haría inusable la herramienta— pero deja
+            # constancia de que hubo una ventana sin demostrar. Es lo que permite que la
+            # atestación de `core.trust` distinga «el juez cambió y sé por qué» de «el juez
+            # cambió y nadie declaró poder hacerlo». Ver FORMAL-MODEL §6.3.
+            "opaco": bool(getattr(decision, "opaco", False)),
+            "escrituras_probadas": list(getattr(decision, "escrituras", ()) or ()),
         })
     except Exception as exc:                                            # noqa: BLE001
         aviso = (f"AUDITORÍA INTERRUMPIDA: esta decisión no se pudo registrar en "
@@ -254,12 +349,30 @@ def main(argv: list | None = None) -> int:
     if fact["structured_reply"]:
         mapping = {ALLOW: "allow", DENY: "deny", ASK: "ask"}
         motivo = decision.reason or "política de refuto"
+        nombre = mapping[decision.outcome]
         if aviso:
             motivo = f"{motivo}\n\n⚠ {aviso}"
+            # Un fallo de auditoría no es «todo bien». Con respuesta estructurada el aviso
+            # viajaba en el texto y la decisión seguía siendo `allow`, así que la escritura
+            # ocurría igual: el rastro se cortaba y nadie lo echaba en falta — que es lo que
+            # `_emit_event` dice existir para impedir.
+            #
+            # Medido el 2026-09-25 con el diario inescribible y una escritura que aprobaría:
+            #
+            #     claude                     allow   ← la escritura ocurre
+            #     kiro · gemini · opencode   exit 2  ← bloquea
+            #     antigravity                ask
+            #
+            # Tres respuestas al mismo hecho, y la permisiva era la del runtime principal.
+            # `_main_antigravity` ya hacía esto; aquí faltaba. Se iguala al más prudente de los
+            # dos dialectos estructurados: `ask`, no `deny` — el trabajo no se pierde, lo
+            # decide una persona.
+            if nombre == "allow":
+                nombre = "ask"
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": mapping[decision.outcome],
+                "permissionDecision": nombre,
                 "permissionDecisionReason": motivo,
             }
         }, ensure_ascii=False))

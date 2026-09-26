@@ -22,7 +22,6 @@ archivo que nadie revisó.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from core.digest import sha256_file
 from core.model import BLOCKED, FAIL, Finding, HIGH, PASS, Result

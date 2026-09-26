@@ -13,7 +13,7 @@ que terminó.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 #: El ciclo, en orden. No todas las fases aplican a todo trabajo: las que no, se declaran
 #: `SKIPPED` con motivo, nunca se omiten en silencio.

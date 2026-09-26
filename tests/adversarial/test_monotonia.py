@@ -22,7 +22,7 @@ import copy
 import unittest
 
 from core.model import NOT_EXECUTABLE, PASS
-from core.refinement import REGLAS, identidad_de, refinar, resolver
+from core.refinement import identidad_de, refinar, resolver
 from tests.fixtures import Workspace
 
 #: La política del cliente. Deliberadamente pequeña: lo que se prueba es la relación entre

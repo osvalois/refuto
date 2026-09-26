@@ -42,7 +42,6 @@ import os
 import platform
 import re
 import subprocess
-import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -50,7 +49,48 @@ from pathlib import Path
 
 from core.proc import TEXT_IO
 
-VERSION = "0.2.0"
+
+def _version_declarada() -> str:
+    """La versión del motor, leída del fichero `VERSION`, que es su única fuente.
+
+    El defecto que esto cierra, medido el 2026-09-25
+    -----------------------------------------------
+    Esto era `VERSION = "0.2.0"` a fuego, y el fichero `VERSION` decía `0.3.0`. Dos fuentes para
+    el mismo hecho, y la que se separó sin avisar era la que **firma toda la evidencia**:
+    `provenance()` pone este valor en `harness_version`, así que cada informe emitido declaraba
+    haber salido de un motor que no era el suyo. Comprobado en un artefacto real
+    (`.harness/evidence/ver_*.json`): `harness_version: 0.2.0` con `VERSION` en `0.3.0`.
+
+    Para un producto cuya tesis es que la evidencia se puede falsar, una procedencia equivocada
+    no es un detalle cosmético: es la cifra que permitiría reproducir la medición, y apuntaba al
+    sitio equivocado. `refuto upgrade` leía el fichero y `provenance` la constante, de modo que la
+    herramienta sabía la versión correcta y la escribía mal.
+
+    Si no se puede leer, se declara `desconocida`. Nunca un número inventado: una procedencia que
+    miente es peor que una que se declara ausente, porque la segunda se nota.
+    """
+    # Junto al paquete en un clon; junto al módulo si alguien reubica el árbol.
+    for candidata in (Path(__file__).resolve().parents[1] / "VERSION",
+                      Path(__file__).resolve().parent / "VERSION"):
+        try:
+            texto = candidata.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if texto:
+            return texto
+    # Instalado como paquete, donde `VERSION` puede no viajar junto al módulo.
+    try:
+        from importlib.metadata import PackageNotFoundError, version as _dist_version
+        try:
+            return _dist_version("refuto")
+        except PackageNotFoundError:
+            pass
+    except ImportError:                                               # pragma: no cover
+        pass
+    return "desconocida"
+
+
+VERSION = _version_declarada()
 SCHEMA_VERSION = "harness.result/v1"
 
 # ── estados ───────────────────────────────────────────────────────────────────────────
@@ -59,18 +99,96 @@ FAIL = "FAIL"
 BLOCKED = "BLOCKED"
 NOT_EXECUTABLE = "NOT_EXECUTABLE"
 NOT_APPLICABLE = "NOT_APPLICABLE"
-STATUSES = (PASS, FAIL, BLOCKED, NOT_EXECUTABLE, NOT_APPLICABLE)
+#: El sexto, y el que faltaba para poder decir «las dos fuentes de verdad no coinciden».
+#:
+#: `INCONCLUSIVE` no es «falló» ni «no se pudo correr»: es que hay evidencia CONTRADICTORIA,
+#: o que la integridad de la evidencia no se pudo establecer. Sin él, una discrepancia entre
+#: el artefacto de una corrida y el diario que la registró tenía que colapsarse en alguno de
+#: los otros cinco, y el que más se le parecía —`NOT_EXECUTABLE`— decía algo falso: la
+#: verificación sí se ejecutó, lo que no se sabe es cuál de los dos registros es el suyo.
+#: Estaba en el contrato declarado (`AGENTS.md`, `README`) y no en el tipo. Ver FORMAL-MODEL §2.
+INCONCLUSIVE = "INCONCLUSIVE"
+STATUSES = (PASS, FAIL, BLOCKED, NOT_EXECUTABLE, NOT_APPLICABLE, INCONCLUSIVE)
 
-#: Los cuatro estados que NO son un aprobado. Se declara como conjunto para que nadie tenga
+#: Los cinco estados que NO son un aprobado. Se declara como conjunto para que nadie tenga
 #: que acordarse de cuáles eran, y para que el contrato lo pueda comprobar.
-NON_PASSING = frozenset({FAIL, BLOCKED, NOT_EXECUTABLE, NOT_APPLICABLE})
+NON_PASSING = frozenset({FAIL, BLOCKED, NOT_EXECUTABLE, NOT_APPLICABLE, INCONCLUSIVE})
 
 #: Los que además IMPIDEN integrar. `NOT_APPLICABLE` no está: una puerta sin sujeto en este
-#: espacio no puede retener un cambio. Lo que no puede hacer es contarse como aprobada, y de
-#: eso se encarga `NON_PASSING` y el veredicto de `core.evidence.verdict_of`.
-BLOCKING = frozenset({FAIL, BLOCKED, NOT_EXECUTABLE})
+#: espacio no puede retener un cambio. `INCONCLUSIVE` SÍ está: no saber si la evidencia
+#: corresponde al veredicto es exactamente el estado en el que no se integra.
+BLOCKING = frozenset({FAIL, BLOCKED, NOT_EXECUTABLE, INCONCLUSIVE})
 
-SYMBOL = {PASS: "✓", FAIL: "✗", BLOCKED: "⊘", NOT_EXECUTABLE: "!", NOT_APPLICABLE: "–"}
+SYMBOL = {PASS: "✓", FAIL: "✗", BLOCKED: "⊘", NOT_EXECUTABLE: "!", NOT_APPLICABLE: "–",
+          INCONCLUSIVE: "?"}
+
+
+# ── cobertura de la observación ──────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Scope:
+    """Cuánto llegó a mirar una puerta. Es lo que separa verdad vacua de evidencia.
+
+    El defecto que esto cierra
+    --------------------------
+    Una propiedad de la forma `∀x ∈ S : P(x)` es **matemáticamente verdadera** cuando
+    `S = ∅`. Eso no es evidencia empírica de nada, y sin embargo producía `PASS`. Medido el
+    2026-09-23 en un espacio cuyo contenido vivía bajo `node_modules/` y `dist/`, con una
+    credencial `AKIA…` real dentro:
+
+        G-SECURITY  PASS  «0 archivos recorridos · 0 hallazgos»
+
+    Tres nociones que se confundían en una:
+
+        verdad matemática   `∀x ∈ ∅ : P(x)` es cierto
+        evidencia empírica  exige haber observado sujetos
+        cobertura           cuántos del universo se llegaron a observar
+
+    Los campos
+    ----------
+    `examined`  sujetos efectivamente observados.
+    `unknown`   sujetos que se intentó observar y NO se pudo: un fichero ilegible, una
+                herramienta que reventó, una salida que no se pudo interpretar. Uno solo
+                impide aprobar — no se sabe qué había ahí, y no saber no es estar bien.
+    `universe`  qué se estaba contando, en palabras, para que el informe se lea.
+    `declared`  si el espacio DECLARABA que debía haber sujetos. Distingue los dos ceros:
+                cero sin declaración es `NOT_APPLICABLE` (no hay sujeto aquí) y cero con
+                declaración es `BLOCKED` (debía haberlo y no lo hubo).
+    """
+
+    examined: int = 0
+    unknown: int = 0
+    universe: str = ""
+    declared: bool = True
+
+    @property
+    def complete(self) -> bool:
+        """`CompleteObservation`: se observó algo y no quedó nada sin saber."""
+        return self.examined > 0 and self.unknown == 0
+
+    def to_dict(self) -> dict:
+        return {"examined": self.examined, "unknown": self.unknown,
+                "universe": self.universe, "declared": self.declared}
+
+
+# ── resultado de una herramienta externa ─────────────────────────────────────────────
+#: Lo que puede devolver un escáner, y por qué no son dos cosas.
+#:
+#: `g_security.py` trataba «la herramienta no está» como `BLOCKED` (correcto, y su docstring
+#: lo defendía bien) y «la herramienta está y revienta» como una simple observación, que
+#: terminaba en `PASS`. Medido el 2026-09-23 con `trivy` fallando por su base de datos: la
+#: puerta salía verde sin haber escaneado una sola vulnerabilidad. Un escáner instalado que
+#: revienta es **epistémicamente idéntico** a uno ausente: en los dos casos no se sabe.
+OK, ABSENT, ERROR, TIMEOUT, INVALID_OUTPUT = (
+    "OK", "ABSENT", "ERROR", "TIMEOUT", "INVALID_OUTPUT")
+TOOL_OUTCOMES = (OK, ABSENT, ERROR, TIMEOUT, INVALID_OUTPUT)
+
+#: La única traducción admisible. Ninguna produce `PASS`.
+OUTCOME_STATUS = {
+    ABSENT: BLOCKED,             # dependencia declarada que no está
+    ERROR: NOT_EXECUTABLE,       # se intentó y no se pudo correr
+    TIMEOUT: NOT_EXECUTABLE,
+    INVALID_OUTPUT: NOT_EXECUTABLE,
+}
 
 # ── severidad ─────────────────────────────────────────────────────────────────────────
 CRITICAL, HIGH, MEDIUM, LOW, INFO = "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"
@@ -153,6 +271,8 @@ class Result:
     provenance: dict = field(default_factory=dict)
     duration_ms: int = 0
     blocks: bool = True
+    #: Cuánto se llegó a mirar. **Obligatorio para aprobar** — ver el invariante 3.
+    scope: "Scope | None" = None
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
@@ -177,6 +297,33 @@ class Result:
                 f"{self.id}: PASS con {len(self.findings)} hallazgos. Un resultado con "
                 f"hallazgos no aprueba: o el hallazgo sobra, o el estado está mal. "
                 f"Primero: {self.findings[0].as_text() if hasattr(self.findings[0], 'as_text') else self.findings[0]}")
+        # Invariante duro 3: `PASS` exige COBERTURA. `∀x ∈ ∅ : P(x)` es verdad y no es
+        # evidencia; y un sujeto que no se pudo mirar no es un sujeto que esté bien.
+        #
+        # Se comprueba aquí por el mismo motivo que el invariante 2: en cada puerta se
+        # olvida. Dos puertas aprobaban con el ámbito vacío el 2026-09-23 —`G-SECURITY` con
+        # «0 archivos recorridos» y `core.lock.verify` con «0 archivos anclados»— y las dos
+        # lo decían en su propia medida, en voz alta, sin que nadie lo leyera. Una puerta
+        # nueva que olvide declarar `scope` revienta AQUÍ, al construir, no en producción.
+        # `scope` ausente NO revienta aquí, y la razón es de autoridad, no de comodidad: el
+        # registro de puertas vive en `gates/`, que la política protege — el sujeto evaluado
+        # no puede editar a su juez, y eso incluye al agente que está leyendo esto. Exigir
+        # `scope` al construir obligaría a tocar las trece puertas a la vez desde dentro del
+        # sujeto. En su lugar, quien tiene autoridad de VEREDICTO —`core.evidence`— se niega
+        # a contar como aprobada una puerta que no declaró qué miró. Una puerta sin `scope`
+        # no puede producir una corrida integrable; ver `core.evidence.verdict_of`.
+        if self.status == PASS and self.scope is not None:
+            if self.scope.examined == 0:
+                raise ValueError(
+                    f"{self.id}: PASS con ámbito vacío (0 {self.scope.universe or 'sujetos'}). "
+                    f"Una comprobación que no encontró nada que comprobar no ha pasado. "
+                    f"Use `not_applicable()` si de verdad no hay sujeto, o `blocked()` si "
+                    f"debía haberlo.")
+            if self.scope.unknown:
+                raise ValueError(
+                    f"{self.id}: PASS con {self.scope.unknown} "
+                    f"{self.scope.universe or 'sujetos'} que no se pudieron observar. "
+                    f"UNKNOWN no es PASS: no se sabe qué había ahí.")
 
     @property
     def passing(self) -> bool:
@@ -197,6 +344,7 @@ class Result:
             "provenance": self.provenance,
             "duration_ms": self.duration_ms,
             "blocks": self.blocks,
+            "scope": self.scope.to_dict() if self.scope else None,
         }
 
 

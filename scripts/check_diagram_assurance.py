@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import re
 import sys
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET   # nosec B405 — sólo biblioteca estándar por ADR-0002;
+# `defusedxml` sería una dependencia. El vector de entidades se trata en el punto de parseo.
 from pathlib import Path
 
 # Cargar registro de puertas de refuto
@@ -71,9 +72,27 @@ def check_diagram(file_path: Path) -> int:
 
     content = file_path.read_text(encoding="utf-8")
 
+    # 0. Declaraciones de entidad, ANTES de parsear.
+    #
+    # Este guion parsea un fichero del disco, y en CI ese fichero llega dentro de un PR — es
+    # decir, entrada NO confiable en un repositorio público. `xml.etree.ElementTree` no resuelve
+    # entidades externas, así que XXE no aplica; sí aplica la expansión de entidades internas
+    # («billion laughs»), que agota memoria y CPU con un fichero de pocos kilobytes. Lo señaló
+    # `bandit` (B314) el 2026-09-25, y la mitigación sin dependencias es rechazar el vector en
+    # vez de endurecer el parser: un diagrama legítimo de este proyecto no declara entidades.
+    #
+    # Se mira el texto y no el árbol a propósito: comprobarlo después de parsear sería
+    # comprobarlo después del daño.
+    bajo = content.lstrip()[:4096].upper()
+    if "<!DOCTYPE" in bajo or "<!ENTITY" in bajo:
+        print(f"[FAIL] {file_path} declara DOCTYPE o ENTITY. Un diagrama de este proyecto no "
+              f"los usa, y la expansión de entidades es un vector de agotamiento de recursos "
+              f"en un parser sin defensa. No se parsea.")
+        return 1
+
     # 1. Validación XML
     try:
-        root = ET.fromstring(content)
+        root = ET.fromstring(content)   # nosec B314 — vector de entidades rechazado arriba
     except ET.ParseError as exc:
         print(f"[FAIL] Error de sintaxis XML en {file_path}: {exc}")
         return 1

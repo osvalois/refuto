@@ -85,6 +85,13 @@ jobs:
         # citas, 16 resolvían y 6 mentían — tres apuntaban a una línea en blanco.
         run: python3 scripts/check_citas.py
 
+      - name: Las mediciones del README siguen dando eso
+        # Las cifras ESTRUCTURALES ya las vigila `check_wiring`; las de CORRIDA no tenían
+        # vigilante, y son las que el README cita como E3/E4. Medido el 2026-09-25: la tabla
+        # declaraba 685 pruebas y 13 controles con fecha de ese mismo día, cuando eran 748 y
+        # 14 — cinco commits habían pasado por encima del commit que las puso al día.
+        run: python3 scripts/check_mediciones.py
+
       - name: Aseguramiento de diagramas de arquitectura
         run: |
           python3 scripts/generate_architecture_diagrams.py
@@ -252,3 +259,70 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with: { name: sonda, path: probe.json, retention-days: 30 }
+
+  calidad:
+    name: Preflight — calidad, análisis estático y secretos
+    runs-on: ubuntu-latest
+    # `scripts/preflight.py` es el MISMO guion que corre el gancho `pre-push`. Que CI ejecute
+    # otro conjunto de comprobaciones que el local es cómo un preflight deja de significar nada:
+    # pasa en la máquina de quien empuja y se cae aquí, o al contrario. Una fuente, dos sitios.
+    #
+    # `check_wiring.py` lo exige, y no como formalidad: «un guion que existe y que CI no ejecuta
+    # es una comprobación que nadie corre». Este trabajo nació porque esa puerta se puso en rojo
+    # al añadir el preflight, que es exactamente lo que tenía que pasar.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 0 }   # `gitleaks detect` recorre el historial, no el árbol
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with: { python-version: "3.13" }
+
+      - name: Herramientas de análisis, con versión anclada
+        env:
+          RUFF: "0.16.9"
+          BANDIT: "1.9.4"
+          ACTIONLINT: "1.7.12"
+          GITLEAKS: "8.30.1"
+        run: |
+          set -euo pipefail
+          # Ancladas por la misma razón que gitleaks/syft/trivy en el trabajo «espacio»: una
+          # herramienta de análisis que cambia de versión sola cambia el veredicto sola, y
+          # entonces un rojo nuevo no distingue «el código empeoró» de «el linter cambió».
+          # `pip` con `==` y `--require-hashes` sería más fuerte; queda declarado como pendiente.
+          python3 -m pip install --quiet "ruff==${RUFF}" "bandit==${BANDIT}"
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT}/actionlint_${ACTIONLINT}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS}/gitleaks_${GITLEAKS}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          ruff --version; bandit --version 2>&1 | head -1
+          actionlint --version; gitleaks version
+
+      - name: Preflight
+        run: |
+          set -uo pipefail
+          # Se excluyen `suite` y `verify` porque los ejecutan los trabajos «contrato» y
+          # «espacio»: duplicarlos costaría ~200 s por corrida y no añadiría una afirmación.
+          # El sobre DECLARA lo que no cubrió, así que el recorte es visible y no silencioso.
+          set +e
+          python3 scripts/preflight.py --excepto suite --excepto verify --json > preflight.json
+          rc=$?
+          set -e
+          echo "preflight rc=$rc  (0 verde · 1 rojo · 2 no se pudo comprobar)"
+          test -s preflight.json || { echo "el preflight no produjo salida"; exit 1; }
+          python3 -c "
+          import json, sys
+          s = json.load(open('preflight.json'))
+          print(f\"  {s['command']}: {s['status']} (exit {s['exit']})\")
+          for c in s['payload']['checks']:
+              print(f\"    {c['status']:<8} {c['nombre']:<18} {c['ms']:>7} ms\")
+          for n in s['next']:
+              print(f\"    → {n['why'][:200]}\")
+          sys.exit(s['exit'])
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with: { name: preflight, path: preflight.json, retention-days: 30 }

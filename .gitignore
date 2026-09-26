@@ -2,6 +2,14 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Artefactos de empaquetado. `pyproject.toml` existe, luego cualquiera puede ejecutar
+# `pip install .` o `python -m build` — y hasta el 2026-09-25 eso dejaba `build/` (936 KB) y
+# `refuto.egg-info/` (28 KB) sin excluir, listos para colarse en el siguiente commit. Se
+# descubrió midiendo justo eso: comprobar si el paquete instalado resuelve `schemas/`.
+build/
+dist/
+*.egg-info/
+
 # Ajustes LOCALES de cada agente. Llevan dentro la ruta ABSOLUTA del guardián —
 # `/ruta/de/quien/instala/.harness/bin/guard`— porque el gancho se escribe con la ruta
 # resuelta de esa máquina. Hasta el 2026-09-22 este repositorio no los excluía: se salvaban

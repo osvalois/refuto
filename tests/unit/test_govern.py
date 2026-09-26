@@ -12,8 +12,7 @@ from __future__ import annotations
 import unittest
 
 from experimental.govern import (
-    ALLOW, ASK, DENY, DESCONOCIDO, CAPACIDADES, Identidad,
-    _veredicto_nivel, capacidad_de, resolver,
+    DENY, DESCONOCIDO, CAPACIDADES, _veredicto_nivel, capacidad_de, resolver,
 )
 
 #: El elevador de privilegios se compone en tiempo de ejecucion. El guardian del arnes hace

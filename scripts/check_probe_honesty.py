@@ -36,7 +36,10 @@ def main(argv) -> int:
         print(f"  ✗ no existe el archivo: {path}\n\n{USAGE}")
         return 2
     try:
-        reports = json.loads(path.read_text(encoding="utf-8"))
+        # `payload_of` acepta las dos formas: la lista suelta de antes del sobre y el
+        # `harness.envelope/v1` de ahora. El puente vive en el contrato, no aquí.
+        from core.envelope import payload_of
+        reports = payload_of(json.loads(path.read_text(encoding="utf-8")))
     except ValueError as e:
         print(f"  ✗ no es JSON válido ({e})")
         return 2

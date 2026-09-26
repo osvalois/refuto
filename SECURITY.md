@@ -13,11 +13,68 @@ De ahí la regla que ordena todo lo demás: **un agente no puede ser juez de sí
 | Capa | Qué ve | Qué NO ve | ¿Puede el agente tocarla? |
 |---|---|---|---|
 | **1 · Política compilada** al runtime | patrones de ruta y de orden | el contenido escrito | sí — vive en el repositorio |
-| **2 · Guardián** (`core/guard.py`) | ruta **resuelta** y contenido | lo que pase fuera de sus ganchos | sí — vive en el repositorio |
-| **3 · Rama protegida y CI** | el resultado, sobre el repositorio remoto | nada de lo anterior en el momento | **no** |
+| **2 · Guardián** (`core/guard.py`) | ruta **resuelta**, contenido, y los efectos **demostrables** de una orden | lo que haga una orden opaca (`python3 -c`, `make`, un binario propio) | sí — vive en el repositorio |
+| **3 · Atestación** (`core/trust.py`, `core/evidence.py`) | si el juez o la evidencia cambiaron desde el veredicto | quién los cambió | sí — pero **no sin dejar rastro** |
+| **4 · Rama protegida y CI** | el resultado, sobre el repositorio remoto | nada de lo anterior en el momento | **no** |
 
-Las dos primeras son **preventivas**: acercan el fallo al momento de escribir. La tercera es el
-control. Presentar la capa 1 como garantía sería vender lo que no se tiene.
+Las dos primeras son **preventivas**: acercan el fallo al momento de escribir. La tercera es
+**detectiva**: no impide, delata. La cuarta es el control. Presentar la capa 1 como garantía
+sería vender lo que no se tiene.
+
+## La propiedad que se afirma, y la que no
+
+Se afirma `I6'`, no `I6`:
+
+```
+I6   Agent ∉ Authority(Judge)           NOT_PROVEN — ver abajo
+I6'  Modified(Judge) ⟹ ¬PASS            demostrada
+```
+
+**Por qué `I6` no se afirma**, y son dos razones independientes:
+
+- **Indecidibilidad.** El efecto exacto de una orden de consola no es computable: para
+  cualquier máquina `M`, `python3 -c 'if M(w) para: open("gates/base.py","w")'` escribe en el
+  juez si y sólo si `M` para. Todo analizador estático es incorrecto o incompleto. Uno
+  correcto tendría que denegar `python3`, `make` y cualquier binario compilado.
+- **Frontera de proceso.** El agente corre con el uid del operador sobre el mismo sistema de
+  archivos y puede ejecutar procesos. El guardián es un gancho **consultivo**: una vez el
+  runtime ejecuta `bash -c …`, la única autoridad es el núcleo del sistema operativo.
+
+Lo que sí se hace: `core/effects.py` calcula `Ê ⊆ Effects`, las escrituras **demostrables**
+desde la sintaxis, y `decide_command` las pasa por la misma regla de rutas que `decide_write`.
+Cubre redirección, anexado, `tee`, edición en sitio, copia, movimiento, borrado, truncado,
+encadenamiento, envoltura, intérpretes con `-c` y travesía con `..`. Lo que no se puede
+demostrar se marca `opaco` y **se permite**, dejando constancia en el diario — denegar todo
+intérprete haría inusable la herramienta, y un control inusable se desactiva.
+
+Probado en `tests/adversarial/test_efectos_cruzados.py`: el producto cartesiano de 18
+mecanismos de escritura × 10 rutas protegidas, más su control de falsos positivos sobre
+rutas libres. Ver [ADR-0013](docs/decisions/ADR-0013-raiz-de-confianza-y-modelo-de-efectos.md)
+y [`docs/assurance/FORMAL-MODEL.md`](docs/assurance/FORMAL-MODEL.md).
+
+## Raíz de confianza de la política
+
+`Trusted(Π) ⟺ Reachable(Π, R) ∧ Monotone(cadena) ∧ Acyclic(cadena)`.
+
+La monotonía sola era **relativa**: se demostraba `hijo ⊒ padre` en cada arista y el hijo
+elegía el padre, así que apuntar `extends` a una política laxa vaciaba el gobierno sin violar
+una sola arista. Ahora toda política se compone con la línea base del motor (`R`,
+`core/trust.py`) como padre implícito. En los campos que acumulan el efectivo es la unión, así
+que vaciar `protected_paths` o `command_deny` no es una violación que haya que cazar: es algo
+que **no se puede escribir**.
+
+## Integridad de la evidencia
+
+El diario es una cadena de huellas (`hᵢ = H(hᵢ₋₁ ‖ canonical(eventoᵢ))`) y el artefacto de
+cada corrida se compromete con `engine_digest`, `policy_digest` y la cabeza del diario. Al
+leer se reconcilian: si discrepan, el veredicto reportado pasa a `NO INTEGRABLE`; si la
+integridad no se puede establecer, `INCONCLUSIVE`.
+
+**Es tamper-evidencia, no tamper-proofing.** Un adversario que reescriba la cadena entera y
+todas sus copias publicadas produce un diario coherente. Lo que ya no puede es editar una
+línea y marcharse. Y hay un ataque que la cadena por sí sola no ve: **cortar la cola** deja
+los eslabones restantes consistentes. Se cierra publicando la cabeza fuera del árbol; sin
+ancla publicada queda `NOT_PROVEN`.
 
 **Dónde está enganchada de verdad la capa 2** (medido el 2026-09-22, `E1`, lectura de
 `refuto.py::policy wire` y `core/guard.py`): `claude`, `kiro` y `antigravity`. Para `gemini` y
@@ -98,8 +155,13 @@ cubre»).
   lo segundo no está en nuestra mano. Es más débil que un guardarraíl en la puerta del modelo, y
   por eso se declara compensatorio.
 - **Lo que ocurre dentro del agente.** `refuto` observa entradas y salidas.
+- **Una orden opaca que escribe donde no debe.** `python3 -c`, `make`, un binario propio: su
+  efecto no se deriva de sus argumentos y `Ê` lo declara en vez de suponerlo. La respuesta es
+  la capa 3 (atestación): la escritura no se impide, pero ningún veredicto posterior puede ser
+  `PASS` si el juez cambió. `I6` en su forma fuerte queda `NOT_PROVEN`.
+- **Truncar la cola del diario** sin un ancla publicada fuera del árbol. `NOT_PROVEN`.
 - **Un agente que corre sin el gancho enganchado.** Hoy eso incluye `gemini`, `opencode` y
-  `codex`. La capa 3 es la respuesta.
+  `codex`. La capa 4 es la respuesta.
 - **Una sesión con `sudo`.** El guardián sigue decidiendo sobre lo que la herramienta le declara,
   pero un proceso con privilegios de root escribe donde quiera, incluida la configuración del
   propio usuario fuera del espacio.

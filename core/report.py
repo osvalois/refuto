@@ -41,7 +41,14 @@ def render(results: list, verdict: str, *, verbose: bool = False) -> str:
         for f in r.findings[: (200 if verbose else 6)]:
             lines.append(paint(f"      ✗ {f.as_text()}", _C[FAIL]))
         if len(r.findings) > 6 and not verbose:
-            lines.append(dim(f"      … y {len(r.findings) - 6} más (use --verbose)"))
+            # La orden ENTERA, y no el nombre de la bandera. `--verbose` es global y va ANTES
+            # del subcomando, así que quien leía «use --verbose» escribía `refuto verify
+            # --verbose` —lo natural— y recibía `unrecognized arguments: --verbose` con salida
+            # 64. Un `next` que no se puede pegar en la consola no es un `next`: es el mismo
+            # defecto que `core.envelope.Siguiente` documenta para `do`, «una orden ejecutable,
+            # no una descripción», aplicado al texto que sí lee una persona.
+            lines.append(dim(f"      … y {len(r.findings) - 6} más "
+                             f"(véalos con  refuto --verbose verify)"))
         for o in r.observations[: (200 if verbose else 4)]:
             lines.append(dim(f"      i {o}"))
         lines.append("")

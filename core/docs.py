@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.model import AGENT_VERIFIED, FUNCTIONAL, INSTALLED, STARTABLE, now, rung
+from core.model import FUNCTIONAL, STARTABLE, now, rung
 
 #: Vocabulario de la matriz. Cada palabra dice de dónde salió la casilla.
 NATIVE = "NATIVO"          # lo trae el agente, comprobado ejecutándolo
